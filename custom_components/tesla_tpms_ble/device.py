@@ -1,0 +1,14 @@
+"""Bluetooth entity-key helpers."""
+from __future__ import annotations
+
+from homeassistant.components.bluetooth.passive_update_processor import (
+    PassiveBluetoothEntityKey,
+)
+from sensor_state_data import DeviceKey
+
+
+def device_key_to_bluetooth_entity_key(
+    device_key: DeviceKey,
+) -> PassiveBluetoothEntityKey:
+    """Convert a device key to a Bluetooth entity key."""
+    return PassiveBluetoothEntityKey(device_key.key, device_key.device_id)

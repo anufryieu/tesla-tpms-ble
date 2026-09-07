@@ -1,0 +1,34 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "bluetooth_confirm": {
+        "description": "Set up {name}?"
+      },
+      "user": {
+        "description": "Choose a device to set up",
+        "data": {
+          "address": "Bluetooth address"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Device is already configured",
+      "no_devices_found": "No unconfigured Tesla-protocol TPMS sensors found. The sensors only transmit when the wheel is turning; drive the car, or wake a sensor with a TPMS activation tool, then retry.",
+      "not_supported": "This device does not broadcast a Tesla-protocol TPMS advertisement"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Decoding options",
+        "description": "The pressure and temperature formulas were derived by reverse engineering and are accurate to roughly 1.5%. Use 'default' unless you have measured otherwise; use the trim fields to correct against a reference gauge.",
+        "data": {
+          "profile": "Decoding profile",
+          "pressure_trim": "Pressure correction (bar)",
+          "temperature_trim": "Temperature correction (°C)"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,208 @@
+# Standalone ESPHome decoder for Tesla-protocol BLE TPMS sensors
+# (Tesla OEM, Autel MX-Sensor BLE, and other Tesla-compatible sensors).
+#
+# Use this when you want an ESP32 near the car to do the decoding itself,
+# independent of the tesla_tpms_ble custom integration.
+#
+# If your Home Assistant box is simply out of range, you do NOT need this file:
+# flash a plain Bluetooth proxy instead (see esphome/bluetooth-proxy.yaml) and
+# let the custom integration decode. That is less code and gets you the trim
+# and profile options.
+#
+# ---------------------------------------------------------------------------
+# SETUP: put your four sensor MAC addresses in the substitutions below. Find
+# them by running `python3 tools/tpms_scan.py`, or by flashing this file once
+# with logging enabled and watching for "unknown Tesla TPMS" lines.
+# ---------------------------------------------------------------------------
+
+substitutions:
+  device_name: tesla-tpms
+  mac_fl: "AA:BB:CC:DD:EE:01"   # front left
+  mac_fr: "AA:BB:CC:DD:EE:02"   # front right
+  mac_rl: "AA:BB:CC:DD:EE:03"   # rear left
+  mac_rr: "AA:BB:CC:DD:EE:04"   # rear right
+
+esphome:
+  name: ${device_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+esp32_ble_tracker:
+  scan_parameters:
+    # Passive scanning is enough: everything we need is in the advertisement,
+    # and it does not wake the sensors or waste their battery.
+    active: false
+    interval: 320ms
+    window: 300ms
+    continuous: true
+  on_ble_advertise:
+    then:
+      - lambda: |-
+          // Bluetooth SIG company identifier 0x022B == "Tesla, Inc."
+          static const uint16_t TESLA_COMPANY_ID = 0x022B;
+
+          for (auto &md : x.get_manufacturer_datas()) {
+            auto uuid = md.uuid.get_uuid();
+            if (uuid.len != ESP_UUID_LEN_16 || uuid.uuid.uuid16 != TESLA_COMPANY_ID)
+              continue;
+
+            const auto &d = md.data;      // company ID already stripped
+            if (d.size() < 8)
+              continue;
+
+            uint8_t  status      = d[2];
+            uint16_t raw_press   = (uint16_t) d[3] | ((uint16_t) d[4] << 8);
+            uint8_t  raw_temp    = d[5];
+            uint16_t battery_mv  = (uint16_t) d[6] | ((uint16_t) d[7] << 8);
+
+            // Reject Tesla *vehicles*, which share this company ID.
+            if (battery_mv < 1500 || battery_mv > 4300)
+              continue;
+
+            std::string mac = x.address_str();
+
+            // status < 5 means the sensor is asleep and the measurement
+            // fields are stale -- publish nothing rather than a stale tyre.
+            if (status < 0x05) {
+              ESP_LOGD("tpms", "%s asleep (status=0x%02X)", mac.c_str(), status);
+              continue;
+            }
+
+            // raw pressure is absolute kPa; subtract one atmosphere for gauge.
+            float pressure_bar = (raw_press - 100.0f) / 100.0f;
+            if (pressure_bar < 0.0f && pressure_bar > -0.2f)
+              pressure_bar = 0.0f;
+            float temperature_c = (float) raw_temp - 50.0f;
+            float volts = battery_mv / 1000.0f;
+
+            ESP_LOGI("tpms", "%s  %.2f bar  %.1f C  %.2f V  (rssi %d)",
+                     mac.c_str(), pressure_bar, temperature_c, volts, x.get_rssi());
+
+            if (mac == "${mac_fl}") {
+              id(fl_pressure).publish_state(pressure_bar);
+              id(fl_temperature).publish_state(temperature_c);
+              id(fl_voltage).publish_state(volts);
+            } else if (mac == "${mac_fr}") {
+              id(fr_pressure).publish_state(pressure_bar);
+              id(fr_temperature).publish_state(temperature_c);
+              id(fr_voltage).publish_state(volts);
+            } else if (mac == "${mac_rl}") {
+              id(rl_pressure).publish_state(pressure_bar);
+              id(rl_temperature).publish_state(temperature_c);
+              id(rl_voltage).publish_state(volts);
+            } else if (mac == "${mac_rr}") {
+              id(rr_pressure).publish_state(pressure_bar);
+              id(rr_temperature).publish_state(temperature_c);
+              id(rr_voltage).publish_state(volts);
+            } else {
+              ESP_LOGW("tpms", "unknown Tesla TPMS %s -- add it to substitutions",
+                       mac.c_str());
+            }
+          }
+
+sensor:
+  # --- front left ---
+  - platform: template
+    name: "FL Tyre Pressure"
+    id: fl_pressure
+    device_class: pressure
+    unit_of_measurement: bar
+    accuracy_decimals: 2
+    state_class: measurement
+  - platform: template
+    name: "FL Tyre Temperature"
+    id: fl_temperature
+    device_class: temperature
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    state_class: measurement
+  - platform: template
+    name: "FL Sensor Voltage"
+    id: fl_voltage
+    device_class: voltage
+    unit_of_measurement: V
+    accuracy_decimals: 2
+    entity_category: diagnostic
+
+  # --- front right ---
+  - platform: template
+    name: "FR Tyre Pressure"
+    id: fr_pressure
+    device_class: pressure
+    unit_of_measurement: bar
+    accuracy_decimals: 2
+    state_class: measurement
+  - platform: template
+    name: "FR Tyre Temperature"
+    id: fr_temperature
+    device_class: temperature
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    state_class: measurement
+  - platform: template
+    name: "FR Sensor Voltage"
+    id: fr_voltage
+    device_class: voltage
+    unit_of_measurement: V
+    accuracy_decimals: 2
+    entity_category: diagnostic
+
+  # --- rear left ---
+  - platform: template
+    name: "RL Tyre Pressure"
+    id: rl_pressure
+    device_class: pressure
+    unit_of_measurement: bar
+    accuracy_decimals: 2
+    state_class: measurement
+  - platform: template
+    name: "RL Tyre Temperature"
+    id: rl_temperature
+    device_class: temperature
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    state_class: measurement
+  - platform: template
+    name: "RL Sensor Voltage"
+    id: rl_voltage
+    device_class: voltage
+    unit_of_measurement: V
+    accuracy_decimals: 2
+    entity_category: diagnostic
+
+  # --- rear right ---
+  - platform: template
+    name: "RR Tyre Pressure"
+    id: rr_pressure
+    device_class: pressure
+    unit_of_measurement: bar
+    accuracy_decimals: 2
+    state_class: measurement
+  - platform: template
+    name: "RR Tyre Temperature"
+    id: rr_temperature
+    device_class: temperature
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    state_class: measurement
+  - platform: template
+    name: "RR Sensor Voltage"
+    id: rr_voltage
+    device_class: voltage
+    unit_of_measurement: V
+    accuracy_decimals: 2
+    entity_category: diagnostic

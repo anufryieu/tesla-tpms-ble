@@ -1,0 +1,99 @@
+diff --git a/custom_components/tpms_ble/manifest.json b/custom_components/tpms_ble/manifest.json
+index d39ddf8..a6ea18a 100644
+--- a/custom_components/tpms_ble/manifest.json
++++ b/custom_components/tpms_ble/manifest.json
+@@ -14,6 +14,9 @@
+     {
+       "manufacturer_id": 295
+     },
++    {
++      "manufacturer_id": 555
++    },
+     {
+       "service_uuid": "000027a5-0000-1000-8000-00805f9b34fb"
+     }
+diff --git a/custom_components/tpms_ble/tpms_parser/parser.py b/custom_components/tpms_ble/tpms_parser/parser.py
+index 90ca5fc..27c2328 100644
+--- a/custom_components/tpms_ble/tpms_parser/parser.py
++++ b/custom_components/tpms_ble/tpms_parser/parser.py
+@@ -73,6 +73,10 @@ class TPMSBluetoothDeviceData(BluetoothData):
+                 self.set_device_manufacturer("Salutica FOBO TypeE")
+                 self._process_tpms_e(address, local_name, mfr_data)
+                 break
++            elif company_id == 555:
++                self.set_device_manufacturer("Tesla / Autel TypeF")
++                self._process_tpms_f(address, local_name, mfr_data)
++                break
+         else:
+             _LOGGER.debug("Can't find the correct data type")
+ 
+@@ -268,6 +272,69 @@ class TPMSBluetoothDeviceData(BluetoothData):
+             battery_voltage,
+         )
+ 
++    def _process_tpms_f(self, address: str, local_name: str, data: bytes) -> None:
++        """Parser for Tesla-protocol BLE TPMS sensors (Type F).
++
++        Covers the Tesla OEM sensor and every aftermarket sensor that emulates
++        it, notably the Autel MX-Sensor BLE. Bluetooth SIG company identifier
++        0x022B (555) is assigned to Tesla, Inc.
++
++        Payload layout after the company ID has been stripped:
++            0     unknown
++            1     unknown
++            2     status; < 0x05 means asleep and the measurement bytes are stale
++            3-4   pressure, uint16 LE, absolute kPa
++            5     temperature, uint8, degC + 50
++            6-7   battery, uint16 LE, millivolts
++        """
++        _LOGGER.debug("Parsing TPMS TypeF (Tesla/Autel) data: %s", data.hex())
++
++        msg_length = len(data)
++        if msg_length < 8:
++            _LOGGER.error(
++                "Found %s bytes from sensor: %s (expected >= 8)", msg_length, address
++            )
++            return
++
++        status = data[2]
++        battery_mv = int.from_bytes(data[6:8], "little")
++
++        # Tesla vehicles advertise under the same company ID; reject anything
++        # whose battery field is not a plausible cell voltage.
++        if not 1500 <= battery_mv <= 4300:
++            _LOGGER.debug(
++                "Tesla company ID from %s but not a TPMS frame: %s", address, data.hex()
++            )
++            return
++
++        battery_voltage = round(battery_mv / 1000.0, 3)
++        battery_pct = battery_percentage(battery_voltage)
++
++        if status < 0x05:
++            # Asleep: the pressure and temperature bytes are not refreshed, so
++            # publish only the battery rather than a stale reading.
++            self._update_sensors(
++                address, None, battery_pct, None, None, battery_voltage
++            )
++            return
++
++        raw_pressure = int.from_bytes(data[3:5], "little")
++        # The raw value is absolute kPa; subtract one atmosphere for gauge.
++        pressure_bar = round((raw_pressure - 100) / 100.0, 3)
++        if -0.2 < pressure_bar < 0.0:
++            pressure_bar = 0.0
++
++        temperature_celcius = data[5] - 50
++
++        self._update_sensors(
++            address,
++            pressure_bar,
++            battery_pct,
++            temperature_celcius,
++            None,
++            battery_voltage,
++        )
++
+     def _update_sensors(self, address, pressure, battery_pct, temperature, alarm, voltage):
+         self._last_update_time = datetime.now(timezone.utc)
+         name = f"TPMS {short_address(address)}"

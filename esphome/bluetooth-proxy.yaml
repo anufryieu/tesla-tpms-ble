@@ -1,0 +1,37 @@
+# Plain Bluetooth proxy for an ESP32 parked near the car.
+#
+# This does no decoding at all: it forwards every BLE advertisement it hears to
+# Home Assistant, where the tesla_tpms_ble custom integration decodes it. This
+# is the recommended option -- you keep the integration's profile switching,
+# trim offsets and raw diagnostic entities, and you get range where you need it.
+#
+# Home Assistant will offer to adopt this device automatically once it boots.
+
+substitutions:
+  device_name: tpms-proxy
+
+esphome:
+  name: ${device_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: false
+    interval: 320ms
+    window: 300ms
+
+bluetooth_proxy:
+  active: false
