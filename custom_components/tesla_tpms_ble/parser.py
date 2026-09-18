@@ -114,6 +114,13 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
             )
             return
 
+        _LOGGER.debug(
+            "%s %s (status 0x%02X): %s",
+            service_info.address,
+            "awake" if reading.awake else "asleep",
+            reading.status,
+            payload.hex(),
+        )
         self._last_update_time = datetime.now(timezone.utc)
 
         address = service_info.address

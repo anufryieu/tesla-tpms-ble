@@ -27,6 +27,9 @@ Assistant hand you in ``manufacturer_data[555]``)::
     6       2     battery millivolts, uint16 little-endian
     7
 
+A sleeping sensor usually stops after the status byte: a fitted Autel sensor
+was captured sending just ``01 fe 03``.
+
 PRESSURE
 --------
 The upstream ESP32 reverse-engineering effort (cunzulatu/Tesla_BLE_TPMS) fitted
@@ -65,6 +68,10 @@ from typing import Final
 
 # Bluetooth SIG company identifier 0x022B == 555 == "Tesla, Inc."
 TESLA_COMPANY_ID: Final[int] = 0x022B
+
+# Minimum manufacturer-data length of any frame: up to and including status.
+# This is all a sleeping sensor sends.
+MIN_SLEEP_PAYLOAD_LEN: Final[int] = 3
 
 # Minimum manufacturer-data length we need to decode a full reading.
 MIN_PAYLOAD_LEN: Final[int] = 8
@@ -149,17 +156,19 @@ def looks_like_tesla_tpms(mfr_data: bytes | bytearray | None) -> bool:
 
     Tesla cars also advertise under company ID 0x022B, so matching the company
     ID alone is not enough. A TPMS frame is a short fixed-size record; the
-    vehicle's VCSEC advertisement is a different shape. We accept anything long
-    enough to decode whose battery voltage lands in a physically plausible
-    range for a coin-cell/primary-lithium TPMS sensor.
+    vehicle's VCSEC advertisement is a different shape. We accept a short sleep
+    frame, or anything long enough to decode whose battery voltage lands in a
+    physically plausible range for a coin-cell/primary-lithium TPMS sensor.
     """
-    if mfr_data is None or len(mfr_data) < MIN_PAYLOAD_LEN:
+    if mfr_data is None or len(mfr_data) < MIN_SLEEP_PAYLOAD_LEN:
         return False
     status = mfr_data[2]
     if status < STATUS_AWAKE_MIN:
         # Sleeping sensor: only the status byte is meaningful, so all we can do
         # is a length check. Accept it -- a vehicle advert is not this short.
         return len(mfr_data) <= 16
+    if len(mfr_data) < MIN_PAYLOAD_LEN:
+        return False
     battery_mv = int.from_bytes(mfr_data[6:8], "little")
     # 1.8 V .. 4.2 V covers every lithium chemistry used in TPMS sensors.
     return 1500 <= battery_mv <= 4300
@@ -203,31 +212,26 @@ def decode(
     already stripped* -- exactly what ``manufacturer_data[555]`` gives you in
     both bleak and Home Assistant.
 
-    Returns ``None`` if the payload is too short to be a TPMS frame.
+    Returns ``None`` if the payload is too short: under 3 bytes, or an awake
+    frame without the measurement bytes.
     """
-    if mfr_data is None or len(mfr_data) < MIN_PAYLOAD_LEN:
+    if mfr_data is None or len(mfr_data) < MIN_SLEEP_PAYLOAD_LEN:
         return None
 
     data = bytes(mfr_data)
     status = data[2]
-    raw_pressure = int.from_bytes(data[3:5], "little")
-    raw_temperature = data[5]
-    raw_battery_mv = int.from_bytes(data[6:8], "little")
-
-    raw = {
-        "byte0": data[0],
-        "byte1": data[1],
-        "status": status,
-        "pressure": raw_pressure,
-        "temperature": raw_temperature,
-        "battery_mv": raw_battery_mv,
-    }
+    raw = {"byte0": data[0], "byte1": data[1], "status": status}
+    if len(data) >= MIN_PAYLOAD_LEN:
+        raw["pressure"] = int.from_bytes(data[3:5], "little")
+        raw["temperature"] = data[5]
+        raw["battery_mv"] = int.from_bytes(data[6:8], "little")
 
     if status < STATUS_AWAKE_MIN:
-        # Sleep frame: the measurement fields are not refreshed. Report the
-        # battery only if it is plausible, and nothing else.
-        volts = raw_battery_mv / 1000.0
-        plausible = 1.5 <= volts <= 4.3
+        # Sleep frame: usually just the three bytes up to status, and any
+        # measurement fields after it are not refreshed. Report the battery only
+        # if it is there and plausible, and nothing else.
+        volts = raw["battery_mv"] / 1000.0 if "battery_mv" in raw else None
+        plausible = volts is not None and 1.5 <= volts <= 4.3
         return TeslaTpmsReading(
             awake=False,
             status=status,
@@ -236,6 +240,13 @@ def decode(
             raw=raw,
             profile=profile.name,
         )
+
+    if len(data) < MIN_PAYLOAD_LEN:
+        return None
+
+    raw_pressure = raw["pressure"]
+    raw_temperature = raw["temperature"]
+    raw_battery_mv = raw["battery_mv"]
 
     pressure_bar = (raw_pressure - profile.pressure_offset) / profile.pressure_divisor
     # A deflated tyre reads slightly negative because of sensor offset; clamp.

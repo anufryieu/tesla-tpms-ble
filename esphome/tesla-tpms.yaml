@@ -43,9 +43,10 @@ wifi:
 
 esp32_ble_tracker:
   scan_parameters:
-    # Passive scanning is enough: everything we need is in the advertisement,
-    # and it does not wake the sensors or waste their battery.
-    active: false
+    # Active, like the ESP32 sketch the protocol was reverse engineered with.
+    # A passive scan never receives scan responses, so anything a sensor puts
+    # there would be invisible.
+    active: true
     interval: 320ms
     window: 300ms
     continuous: true
@@ -61,10 +62,22 @@ esp32_ble_tracker:
               continue;
 
             const auto &d = md.data;      // company ID already stripped
+            if (d.size() < 3)
+              continue;
+
+            std::string mac = x.address_str();
+            uint8_t status = d[2];
+
+            // status < 5 means the sensor is asleep. It then usually sends
+            // just these three bytes, and any measurement fields after them
+            // are stale -- publish nothing rather than a stale tyre.
+            if (status < 0x05) {
+              ESP_LOGD("tpms", "%s asleep (status=0x%02X)", mac.c_str(), status);
+              continue;
+            }
             if (d.size() < 8)
               continue;
 
-            uint8_t  status      = d[2];
             uint16_t raw_press   = (uint16_t) d[3] | ((uint16_t) d[4] << 8);
             uint8_t  raw_temp    = d[5];
             uint16_t battery_mv  = (uint16_t) d[6] | ((uint16_t) d[7] << 8);
@@ -72,15 +85,6 @@ esp32_ble_tracker:
             // Reject Tesla *vehicles*, which share this company ID.
             if (battery_mv < 1500 || battery_mv > 4300)
               continue;
-
-            std::string mac = x.address_str();
-
-            // status < 5 means the sensor is asleep and the measurement
-            // fields are stale -- publish nothing rather than a stale tyre.
-            if (status < 0x05) {
-              ESP_LOGD("tpms", "%s asleep (status=0x%02X)", mac.c_str(), status);
-              continue;
-            }
 
             // raw pressure is absolute kPa; subtract one atmosphere for gauge.
             float pressure_bar = (raw_press - 100.0f) / 100.0f;

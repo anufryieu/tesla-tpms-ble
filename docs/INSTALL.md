@@ -134,9 +134,26 @@ The folder is in the wrong place or you did not do a full restart. Check
 again. A nested folder (`tesla_tpms_ble/tesla_tpms_ble/`) is the usual cause.
 
 **No devices discovered**
-Almost always a sleeping sensor. Confirm with `tools/tpms_scan.py` from a laptop
-next to the wheel. If the laptop sees it and HA does not, it is range — add a
-proxy.
+First find out whether HA hears the sensors at all. Straight after a drive,
+with the car parked, open the Bluetooth advertisement monitor —
+[my.home-assistant.io/redirect/bluetooth_advertisement_monitor](https://my.home-assistant.io/redirect/bluetooth_advertisement_monitor/)
+— and look for a device named `tsTPMS`, or with manufacturer ID `555`
+(`0x022B`).
+
+- **Not listed** — HA never heard them. Either the sensors had gone quiet by
+  the time the car was in range, or the car is simply out of range: a sensor
+  inside a tyre inside a metal wheel is weak, and a car on the drive is rarely
+  within reach of an adapter indoors. Put a proxy where you park, and confirm
+  with `tools/tpms_scan.py` from a laptop next to the wheel.
+- **Listed, but nothing discovered** — update to 1.0.1 or later and restart.
+  Version 1.0.0 rejected the three-byte frames a sleeping sensor sends, and
+  never auto-discovered through a passive scanner (an ESPHome proxy without
+  active connections, a Shelly). If a sensor is still not offered after that,
+  add it by hand while it is listed: **+ Add integration → Tesla / Autel BLE
+  TPMS**. That list only holds sensors heard in the last few minutes.
+- **Listed, but the add-integration list says nothing was found** — the
+  advertisement is not the shape this integration expects. Open an issue with
+  the manufacturer data shown in the monitor.
 
 **Discovered, but pressure and temperature are missing**
 The sensor is asleep. Look at the `Awake` diagnostic entity. Sleep frames do not

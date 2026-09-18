@@ -17,6 +17,13 @@ from decoder import (  # noqa: E402
 )
 
 
+# Captured from a fitted Autel MX-Sensor BLE through Home Assistant's Bluetooth
+# diagnostics: the whole advertisement, and its manufacturer data with the
+# company ID stripped. A sleeping sensor sends just these three bytes.
+REAL_SLEEP_ADVERTISEMENT = bytes.fromhex("020106" "06ff2b02" "01fe03")
+REAL_SLEEP_FRAME = bytes.fromhex("01fe03")
+
+
 def build_payload(status=0x0A, pressure=390, temperature=72, battery_mv=3050,
                   byte0=0x01, byte1=0x02):
     """Build a synthetic manufacturer-data payload (company ID stripped)."""
@@ -131,6 +138,26 @@ class TestSleepMode:
     def test_status_5_and_above_is_awake(self, status):
         assert decode(build_payload(status=status)).awake is True
 
+    def test_real_three_byte_sleep_frame_decodes(self):
+        r = decode(REAL_SLEEP_FRAME)
+        assert r is not None
+        assert r.awake is False
+        assert r.status == 0x03
+        assert r.pressure_bar is None
+        assert r.temperature_c is None
+        assert r.battery_volts is None
+        assert r.raw == {"byte0": 0x01, "byte1": 0xFE, "status": 0x03}
+
+    def test_real_sleep_advertisement_decodes(self):
+        r = decode_full_advertisement(REAL_SLEEP_ADVERTISEMENT)
+        assert r is not None
+        assert r.awake is False
+        assert r.status == 0x03
+
+    def test_truncated_awake_frame_returns_none(self):
+        # Status says awake, but the measurement bytes are missing.
+        assert decode(bytes([0x01, 0xFE, 0x0A])) is None
+
 
 class TestGuards:
     def test_short_payload_returns_none(self):
@@ -155,6 +182,12 @@ class TestShapeHeuristic:
 
     def test_rejects_none(self):
         assert looks_like_tesla_tpms(None) is False
+
+    def test_accepts_real_three_byte_sleep_frame(self):
+        assert looks_like_tesla_tpms(REAL_SLEEP_FRAME) is True
+
+    def test_rejects_truncated_awake_frame(self):
+        assert looks_like_tesla_tpms(bytes([0x01, 0xFE, 0x0A])) is False
 
     def test_rejects_vehicle_like_battery_field(self):
         # A Tesla *vehicle* also advertises under company ID 0x022B; its payload

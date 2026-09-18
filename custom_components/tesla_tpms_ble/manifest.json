@@ -3,7 +3,8 @@
   "name": "Tesla / Autel BLE TPMS",
   "bluetooth": [
     {
-      "manufacturer_id": 555
+      "manufacturer_id": 555,
+      "connectable": false
     }
   ],
   "codeowners": [
@@ -17,5 +18,5 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/anufryieu/tesla-tpms-ble/issues",
   "requirements": [],
-  "version": "1.0.0"
+  "version": "1.0.1"
 }

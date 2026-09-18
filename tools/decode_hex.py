@@ -111,17 +111,22 @@ def main() -> int:
     if any_ok:
         r = reading_fn(blob, PROFILES[profiles[0]])
         raw = r.raw
-        print(
+        line = (
             f"\nraw     byte0=0x{raw['byte0']:02X} byte1=0x{raw['byte1']:02X} "
-            f"status={raw['status']} (0x{raw['status']:02X}) "
-            f"pressure={raw['pressure']} temp={raw['temperature']} "
-            f"batt_mv={raw['battery_mv']}"
+            f"status={raw['status']} (0x{raw['status']:02X})"
         )
+        # A sleep frame usually ends at the status byte.
+        if "pressure" in raw:
+            line += (
+                f" pressure={raw['pressure']} temp={raw['temperature']} "
+                f"batt_mv={raw['battery_mv']}"
+            )
+        print(line)
         return 0
 
     print(
-        "\nNothing decodable. A TPMS frame needs at least 8 bytes of "
-        "manufacturer data after the company ID.",
+        "\nNothing decodable. A TPMS frame needs at least 3 bytes of "
+        "manufacturer data after the company ID, and 8 to carry a reading.",
         file=sys.stderr,
     )
     return 1

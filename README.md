@@ -55,7 +55,10 @@ gets a 6+ year battery life. Sitting in a box on your desk, a sensor may emit
 nothing at all for hours, and when it does emit it will be a sleep frame with no
 pressure in it.
 
-Nothing will be discovered until a sensor is awake. In rough order of ease:
+Nothing will be discovered until a sensor transmits. Fitted Autel sensors have
+been seen sending short sleep frames about once a second while standing still.
+That is enough for discovery, but pressure only arrives once the wheels turn.
+To wake a sensor, in rough order of ease:
 
 1. **Fit them and drive.** Above roughly 25 km/h they transmit every few seconds.
    This is the real answer, and the only one that gives useful data anyway.

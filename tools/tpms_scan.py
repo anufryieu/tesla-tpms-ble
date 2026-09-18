@@ -107,9 +107,15 @@ def fmt_reading(address, name, rssi, reading, show_raw):
         raw = reading.raw
         out += (
             f"\n  {DIM}raw: b0=0x{raw['byte0']:02X} b1=0x{raw['byte1']:02X} "
-            f"status={raw['status']} pressure={raw['pressure']} "
-            f"temp={raw['temperature']} batt_mv={raw['battery_mv']}{RESET}"
+            f"status={raw['status']}"
         )
+        # A sleep frame usually ends at the status byte.
+        if "pressure" in raw:
+            out += (
+                f" pressure={raw['pressure']} temp={raw['temperature']} "
+                f"batt_mv={raw['battery_mv']}"
+            )
+        out += RESET
     return out
 
 

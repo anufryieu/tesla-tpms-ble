@@ -1,19 +1,20 @@
 diff --git a/custom_components/tpms_ble/manifest.json b/custom_components/tpms_ble/manifest.json
-index d39ddf8..a6ea18a 100644
+index d39ddf8..d7e6331 100644
 --- a/custom_components/tpms_ble/manifest.json
 +++ b/custom_components/tpms_ble/manifest.json
-@@ -14,6 +14,9 @@
+@@ -14,6 +14,10 @@
      {
        "manufacturer_id": 295
      },
 +    {
-+      "manufacturer_id": 555
++      "manufacturer_id": 555,
++      "connectable": false
 +    },
      {
        "service_uuid": "000027a5-0000-1000-8000-00805f9b34fb"
      }
 diff --git a/custom_components/tpms_ble/tpms_parser/parser.py b/custom_components/tpms_ble/tpms_parser/parser.py
-index 90ca5fc..27c2328 100644
+index 90ca5fc..13f1a5e 100644
 --- a/custom_components/tpms_ble/tpms_parser/parser.py
 +++ b/custom_components/tpms_ble/tpms_parser/parser.py
 @@ -73,6 +73,10 @@ class TPMSBluetoothDeviceData(BluetoothData):
@@ -27,7 +28,7 @@ index 90ca5fc..27c2328 100644
          else:
              _LOGGER.debug("Can't find the correct data type")
  
-@@ -268,6 +272,69 @@ class TPMSBluetoothDeviceData(BluetoothData):
+@@ -268,6 +272,81 @@ class TPMSBluetoothDeviceData(BluetoothData):
              battery_voltage,
          )
  
@@ -41,7 +42,8 @@ index 90ca5fc..27c2328 100644
 +        Payload layout after the company ID has been stripped:
 +            0     unknown
 +            1     unknown
-+            2     status; < 0x05 means asleep and the measurement bytes are stale
++            2     status; < 0x05 means asleep and the measurement bytes are stale.
++                  A sleeping sensor usually stops here (e.g. 01 fe 03).
 +            3-4   pressure, uint16 LE, absolute kPa
 +            5     temperature, uint8, degC + 50
 +            6-7   battery, uint16 LE, millivolts
@@ -49,13 +51,24 @@ index 90ca5fc..27c2328 100644
 +        _LOGGER.debug("Parsing TPMS TypeF (Tesla/Autel) data: %s", data.hex())
 +
 +        msg_length = len(data)
-+        if msg_length < 8:
-+            _LOGGER.error(
-+                "Found %s bytes from sensor: %s (expected >= 8)", msg_length, address
++        if msg_length < 3:
++            _LOGGER.debug(
++                "Found %s bytes from sensor: %s (expected >= 3)", msg_length, address
 +            )
 +            return
 +
 +        status = data[2]
++        if status < 0x05 and msg_length < 8:
++            # Asleep, and like a fitted Autel sensor sending just 01 fe 03:
++            # nothing to publish, but it is still a sensor.
++            self._update_sensors(address, None, None, None, None, None)
++            return
++        if msg_length < 8:
++            _LOGGER.debug(
++                "Found %s bytes from sensor: %s (expected >= 8)", msg_length, address
++            )
++            return
++
 +        battery_mv = int.from_bytes(data[6:8], "little")
 +
 +        # Tesla vehicles advertise under the same company ID; reject anything

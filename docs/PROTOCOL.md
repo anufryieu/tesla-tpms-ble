@@ -17,10 +17,10 @@ discovered.
 
 ## Transport
 
-Connectionless BLE advertisements. There is no GATT connection, no pairing and
-no bonding — you cannot connect to these sensors, you can only listen. That is
-good news for Home Assistant: a passive scanner or Bluetooth proxy is enough,
-and listening costs the sensor nothing.
+BLE advertisements. Everything this integration reads is in the advertisement
+itself, so nothing ever connects to the sensor, and a passive scanner or
+Bluetooth proxy is enough. That is good news for Home Assistant: listening costs
+the sensor nothing.
 
 ## Advertisement structure
 
@@ -34,6 +34,19 @@ SIG assigns to **Tesla, Inc.**
    0B      FF       2B    02       01 02 0A 86 01 48 EA 0B
                     └── little-endian 0x022B
 ```
+
+That example is synthetic. The first real capture, from a fitted Autel
+MX-Sensor BLE through Home Assistant's Bluetooth diagnostics, is a sleep frame:
+
+```
+ 02 01 06                 flags
+ 06 FF 2B 02 01 FE 03     manufacturer data, company 0x022B: 01 FE 03
+```
+
+The local name `tsTPMS ` (with a trailing space) and a 16-bit service UUID
+`0x1122` are not in that advertisement. BlueZ reported them anyway, so they come
+from the scan response. The four sensors' addresses all start `BC:6A:29`, a
+Texas Instruments prefix.
 
 The ESP32 sketch this work is based on scans raw advertisement bytes for the
 literal marker `0x2B 0x02`. That is not a magic number — it is the Tesla company
@@ -55,24 +68,30 @@ company ID has been stripped:
 | 5 | 1 | temperature | uint8, °C + 50 |
 | 6 | 2 | battery | uint16 little-endian, millivolts |
 
-Minimum decodable length is 8 bytes.
+A reading needs all 8 bytes. A sleep frame is usually just the first 3.
 
 ### Sleep frames
 
-When the wheel is not turning the sensor drops to a low duty cycle and sets
-`status < 0x05`. The pressure and temperature bytes are then **not refreshed**.
-Decoding them anyway is the single easiest way to get a convincing but wrong
-tyre pressure in your dashboard, so this integration publishes nothing but the
-battery from a sleep frame, and exposes an `Awake` binary sensor so you can see
+When the wheel is not turning the sensor sets `status < 0x05` and stops sending
+measurements. The fitted Autel sensors send just `01 FE 03` — the three bytes up
+to status — roughly once a second. Any sensor that does send the measurement
+bytes in a sleep frame does **not refresh** them. Decoding them anyway is the
+single easiest way to get a convincing but wrong tyre pressure in your
+dashboard, so this integration publishes nothing but the battery from a sleep
+frame, and only when the frame carries one. The `Awake` binary sensor shows
 what is happening.
+
+Integration version 1.0.0 required 8 bytes from every frame, so it rejected
+these three-byte sleep frames. The sensors were heard but never offered.
 
 ### Distinguishing a sensor from a car
 
 Tesla *vehicles* also advertise under company ID `0x022B`. Matching on the
 company ID alone will therefore try to turn a passing Model 3 into a tyre. The
-integration applies a shape check — payload at least 8 bytes, and the value at
-offset 6..7 within 1500–4300 mV, a plausible range for the primary lithium cell
-in a TPMS sensor. See `looks_like_tesla_tpms()` in `decoder.py`.
+integration applies a shape check. A sleep frame must be 3 to 16 bytes. An awake
+frame must be at least 8 bytes, with the value at offset 6..7 within 1500–4300 mV,
+a plausible range for the primary lithium cell in a TPMS sensor. See
+`looks_like_tesla_tpms()` in `decoder.py`.
 
 ## Decoding formulas, and how they were derived
 
@@ -129,8 +148,13 @@ fit your own curve. See [CALIBRATION.md](CALIBRATION.md).
 
 ## Open questions
 
-- Bytes 0 and 1 are not understood. They are exposed as raw diagnostics; if you
-  see them vary in an interesting way, that is worth writing down.
+- What an awake frame from an Autel sensor looks like. Only sleep frames have
+  been captured so far. The awake layout above still rests on the upstream
+  sketch alone.
+- Bytes 0 and 1 are not understood. In sleep frames they were `01 FE` on all
+  four sensors, so they are not a sensor ID. They are exposed as raw
+  diagnostics; if you see them vary in an interesting way, that is worth writing
+  down.
 - The full set of `status` values is unknown. Only the `< 0x05` sleep threshold
   is established. There is likely a fast-leak or over-pressure alarm bit in
   there, which would be worth surfacing as a binary sensor.

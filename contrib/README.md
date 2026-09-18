@@ -27,13 +27,15 @@ would both match company ID 555 and race to claim the same sensors.
 ## Verified
 
 The patch applies cleanly to `main` as of the clone date, and the patched parser
-was exercised against a synthetic advertisement through the real
-`bluetooth_sensor_state_data` pipeline:
+was exercised through the real `bluetooth_sensor_state_data` pipeline, with
+synthetic advertisements and with a sleep frame captured from a fitted Autel
+sensor:
 
 ```
-awake  -> {'pressure': 2.9, 'temperature': 22, 'battery': 97, 'voltage': 3.05, ...}
-asleep -> {'battery': 97, 'voltage': 3.05, ...}          # no stale pressure
-vehicle rejected -> True                                  # a Tesla car is not a tyre
+awake       -> {'pressure': 2.9, 'temperature': 22, 'battery': 97, 'voltage': 3.05, ...}
+asleep      -> {'battery': 97, 'voltage': 3.05, ...}     # no stale pressure
+real asleep -> supported, {'signal_strength': -72}       # 01 fe 03, the real frame
+vehicle rejected -> True                                 # a Tesla car is not a tyre
 ```
 
 [tpms_ble]: https://github.com/bkbilly/tpms_ble
