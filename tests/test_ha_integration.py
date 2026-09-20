@@ -232,3 +232,70 @@ class TestDiscoveryMatcher:
         matchers = json.loads(MANIFEST.read_text())["bluetooth"]
         info = bleak_service_info(payload(), connectable=connectable)
         assert any(ble_device_matches(m, info) for m in matchers)
+
+
+class TestPayloadHistory:
+    """The recorder that survives a sensor falling asleep.
+
+    A diagnostic downloaded on the drive always shows a sleep frame, so the
+    history has to keep the awake frame that arrived minutes earlier on the
+    road.
+    """
+
+    def test_sleep_frames_are_recorded_and_deduplicated(self):
+        device = TeslaTPMSBluetoothDeviceData()
+        for _ in range(5):
+            device.update(service_info(REAL_SLEEP_FRAME))
+
+        history = device.history.as_dict()
+        assert history["total_frames"] == 5
+        assert history["distinct_payloads"] == 1
+        assert history["payloads"][0]["hex"] == "01fe03"
+        assert history["payloads"][0]["count"] == 5
+        assert history["payloads"][0]["note"] == "asleep"
+        assert history["payloads"][0]["accepted"] is True
+
+    def test_an_awake_frame_is_still_there_after_the_sensor_sleeps_again(self):
+        device = TeslaTPMSBluetoothDeviceData()
+        device.update(service_info(REAL_SLEEP_FRAME))
+        device.update(service_info(payload()))  # the wheel turns, briefly
+        for _ in range(50):  # parked again, sleep frames for hours
+            device.update(service_info(REAL_SLEEP_FRAME))
+
+        history = device.history.as_dict()
+        assert history["saw_a_full_length_frame"] is True
+        assert history["max_payload_len"] == len(payload())
+        awake = [p for p in history["payloads"] if p["note"] == "awake"]
+        assert len(awake) == 1, "the one awake frame must survive the sleep frames"
+        assert awake[0]["count"] == 1
+
+    def test_only_sleep_frames_reports_no_reading(self):
+        device = TeslaTPMSBluetoothDeviceData()
+        device.update(service_info(REAL_SLEEP_FRAME))
+
+        history = device.history.as_dict()
+        assert history["saw_a_full_length_frame"] is False
+        assert history["max_payload_len"] == 3
+
+    def test_rejected_frames_are_recorded_too(self):
+        # The whole point: a frame the shape check throws away is exactly the
+        # one we would otherwise never learn about.
+        device = TeslaTPMSBluetoothDeviceData()
+        device.update(service_info(bytes.fromhex("01fe0a"))) # awake but truncated
+
+        history = device.history.as_dict()
+        assert history["distinct_payloads"] == 1
+        entry = history["payloads"][0]
+        assert entry["accepted"] is False
+        assert entry["note"] == "not TPMS-shaped"
+
+    def test_distinct_payloads_are_capped(self):
+        from custom_components.tesla_tpms_ble.parser import MAX_DISTINCT_PAYLOADS
+
+        device = TeslaTPMSBluetoothDeviceData()
+        for i in range(MAX_DISTINCT_PAYLOADS + 10):
+            device.update(service_info(bytes([1, 0xFE, 3, i & 0xFF])))
+
+        history = device.history.as_dict()
+        assert history["distinct_payloads"] == MAX_DISTINCT_PAYLOADS
+        assert history["distinct_dropped"] == 10

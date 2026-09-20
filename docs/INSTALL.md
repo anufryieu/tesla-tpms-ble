@@ -160,6 +160,31 @@ The sensor is asleep. Look at the `Awake` diagnostic entity. Sleep frames do not
 refresh those bytes, so the integration deliberately publishes nothing rather
 than a stale reading.
 
+To find out whether it is *ever* awake, download this integration's diagnostics:
+the device page → **⋮ → Download diagnostics**. Under `payload_history` you get
+every distinct payload the sensor has sent since Home Assistant started, with
+counts and timestamps:
+
+```json
+"max_payload_len": 8,
+"saw_a_full_length_frame": true,
+"payloads": [
+  { "hex": "01fe03",           "count": 320, "note": "asleep" },
+  { "hex": "01020a860148ea0b", "count": 3,   "note": "awake"  }
+]
+```
+
+This is the download to take **after a drive**. Home Assistant's own Bluetooth
+diagnostics keep only the *latest* advertisement per device, so they always show
+a sleep frame once you have parked — a three-second awake burst on the road is
+long gone. The payload history keeps it.
+
+- `saw_a_full_length_frame: false` — the sensor never sent a reading while HA
+  was listening. Either it never woke, or it does not put readings in its
+  advertisement at all.
+- a full-length frame present but `"accepted": false` — it reached us and the
+  integration rejected it. That is a bug worth an issue; include the `hex`.
+
 **Readings look wrong**
 See [CALIBRATION.md](CALIBRATION.md). There are two decoding profiles and
 per-sensor trim offsets under **Configure** on each device. Do not reinstall —

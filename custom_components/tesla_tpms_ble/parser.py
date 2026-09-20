@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Any, Final
 
 from bluetooth_data_tools import short_address
 from bluetooth_sensor_state_data import BluetoothData
@@ -16,6 +17,7 @@ from home_assistant_bluetooth import BluetoothServiceInfo
 from sensor_state_data.enum import StrEnum
 
 from .decoder import (
+    MIN_PAYLOAD_LEN,
     PROFILE_DEFAULT,
     PROFILES,
     TESLA_COMPANY_ID,
@@ -25,6 +27,105 @@ from .decoder import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# How many *distinct* payloads to remember per sensor. A well-behaved sensor
+# only ever shows a handful; the cap stops a sensor that varies a counter byte
+# on every frame from growing this without bound.
+MAX_DISTINCT_PAYLOADS: Final[int] = 32
+
+
+class PayloadHistory:
+    """Remember every distinct manufacturer payload a sensor has sent.
+
+    Home Assistant's own Bluetooth diagnostics keep only the *latest*
+    advertisement per device, which is close to useless for a TPMS sensor: it
+    is awake for a few seconds while the wheel turns and asleep again long
+    before anyone downloads a diagnostic. A snapshot taken on the drive will
+    therefore always show a sleep frame, whatever happened on the road.
+
+    Keeping one entry per distinct payload, with counts and timestamps,
+    survives that transition -- a single awake frame during a drive is still
+    listed hours later. ``max_payload_len`` is the field that answers the
+    question this was written for: anything above
+    :data:`~.decoder.MIN_PAYLOAD_LEN` means a real reading reached us.
+
+    The history lives in memory only, so it starts empty after a Home Assistant
+    restart. ``started`` records when, so a diagnostic is never read as covering
+    more time than it does.
+    """
+
+    def __init__(self) -> None:
+        """Start an empty history."""
+        self._entries: dict[bytes, dict[str, Any]] = {}
+        self.started = datetime.now(timezone.utc)
+        self.total_frames = 0
+        self.distinct_dropped = 0
+
+    def record(
+        self,
+        payload: bytes,
+        rssi: int | None,
+        accepted: bool,
+        note: str,
+    ) -> None:
+        """Record one advertisement payload and how the decoder judged it."""
+        self.total_frames += 1
+        now = datetime.now(timezone.utc)
+        entry = self._entries.get(payload)
+
+        if entry is None:
+            if len(self._entries) >= MAX_DISTINCT_PAYLOADS:
+                # Better to lose the newest oddity than to grow without bound;
+                # the count still shows something was dropped.
+                self.distinct_dropped += 1
+                return
+            entry = self._entries[payload] = {
+                "hex": payload.hex(),
+                "length": len(payload),
+                "first_seen": now.isoformat(),
+                "count": 0,
+                "rssi_min": rssi,
+                "rssi_max": rssi,
+            }
+
+        entry["count"] += 1
+        entry["last_seen"] = now.isoformat()
+        entry["accepted"] = accepted
+        entry["note"] = note
+        if rssi is not None:
+            for key, better in (("rssi_min", min), ("rssi_max", max)):
+                current = entry[key]
+                entry[key] = rssi if current is None else better(current, rssi)
+
+    @property
+    def max_payload_len(self) -> int:
+        """Longest payload seen. Above ``MIN_PAYLOAD_LEN`` means a reading."""
+        return max((len(p) for p in self._entries), default=0)
+
+    def as_dict(self) -> dict[str, Any]:
+        """Render the history for a diagnostics download."""
+        payloads = sorted(
+            self._entries.values(), key=lambda e: e["count"], reverse=True
+        )
+        saw_reading = self.max_payload_len >= MIN_PAYLOAD_LEN
+        return {
+            "history_started": self.started.isoformat(),
+            "total_frames": self.total_frames,
+            "distinct_payloads": len(self._entries),
+            "distinct_dropped": self.distinct_dropped,
+            "max_payload_len": self.max_payload_len,
+            "bytes_needed_for_a_reading": MIN_PAYLOAD_LEN,
+            "saw_a_full_length_frame": saw_reading,
+            "verdict": (
+                "A full-length frame arrived, so this sensor does broadcast "
+                "readings -- check 'accepted' on it if no entities appeared."
+                if saw_reading
+                else "Only short frames so far. Either the sensor never woke "
+                "while Home Assistant was listening, or it never puts a "
+                "reading in its advertisement at all."
+            ),
+            "payloads": payloads,
+        }
 
 
 class TPMSSensor(StrEnum):
@@ -68,6 +169,7 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
         self._pressure_trim = pressure_trim
         self._temperature_trim = temperature_trim
         self._last_update_time: datetime | None = None
+        self.history = PayloadHistory()
 
     @property
     def last_update_time(self) -> datetime | None:
@@ -95,9 +197,14 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
         if payload is None:
             return
 
+        # Record before judging: a frame rejected below is exactly the kind we
+        # would otherwise never hear about.
+        rssi = getattr(service_info, "rssi", None)
+
         if not looks_like_tesla_tpms(payload):
             # A Tesla *vehicle* advertises under the same company ID. Ignore it
             # rather than inventing a tyre out of the VCSEC beacon.
+            self.history.record(payload, rssi, accepted=False, note="not TPMS-shaped")
             _LOGGER.debug(
                 "Tesla company ID from %s but payload is not TPMS-shaped: %s",
                 service_info.address,
@@ -107,6 +214,7 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
 
         reading = decode(payload, self._profile)
         if reading is None:
+            self.history.record(payload, rssi, accepted=False, note="undecodable")
             _LOGGER.debug(
                 "Undecodable Tesla TPMS payload from %s: %s",
                 service_info.address,
@@ -114,6 +222,12 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
             )
             return
 
+        self.history.record(
+            payload,
+            rssi,
+            accepted=True,
+            note="awake" if reading.awake else "asleep",
+        )
         _LOGGER.debug(
             "%s %s (status 0x%02X): %s",
             service_info.address,

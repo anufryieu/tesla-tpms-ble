@@ -22,6 +22,16 @@ itself, so nothing ever connects to the sensor, and a passive scanner or
 Bluetooth proxy is enough. That is good news for Home Assistant: listening costs
 the sensor nothing.
 
+This is not the only way the sensor can be read, and it is worth knowing what
+the car does differently. These sensors are **connectable** (a TI CC26xx radio
+alongside a Melexis pressure die), and a Tesla does not read pressure from the
+advertisement at all: it connects and exchanges Protobuf messages over GATT.
+The measurement path this integration relies on — pressure in the advertisement
+— only carries data while the sensor is **awake**. See
+[the connection path](#the-connection-path-what-a-tesla-does) below; it matters
+because a sensor that only ever emits sleep frames will never feed a passive
+listener, however close the adapter is.
+
 ## Advertisement structure
 
 The data lives in a standard Manufacturer Specific Data AD element
@@ -146,11 +156,69 @@ from the options flow, plus additive trim offsets. The untouched wire values are
 exposed as `Raw pressure` and `Raw temperature` diagnostic entities so you can
 fit your own curve. See [CALIBRATION.md](CALIBRATION.md).
 
+## The connection path (what a Tesla does)
+
+The advertisement is only half the picture. These sensors are connectable, and
+a Tesla reads them over a GATT connection rather than from the advertisement.
+Connecting to a fitted Autel sensor (nRF Connect, four units) shows two
+services:
+
+```
+00000211-b2d1-43f0-9b88-960cebf8b91e   Tesla VCSEC communication service
+  00000212-…   write     car  -> sensor
+  00000213-…   indicate  sensor -> car
+  00000214-…   read      communication version
+f000ffd0-0451-4000-b000-000000000000   TI OAD (over-the-air firmware update)
+  f000ffd1-…
+```
+
+The `f000ffd0` service is Texas Instruments' stock OAD profile, which — with the
+`BC:6A:29` (Texas Instruments) address prefix and the `TIAppCRC` field below —
+pins the radio down as a **TI CC26xx**. The pressure die is Melexis (`MLXAppCRC`,
+`MLXWakePeriod`).
+
+Over the `00000211` service the two sides speak length-prefixed **Protocol
+Buffers**, the same `.proto` Tesla's app uses (published as
+`teslamotors/vehicle-command`, message set reverse-engineered publicly by
+Synacktiv, *0-click RCE on Tesla Model 3 through TPMS Sensors*, Hexacon 2024).
+The relevant messages:
+
+```proto
+message TPData         { int32 pressure = 1; sint32 temperature = 2; }
+message TPWheelUnitInfo { bytes TIAppCRC = 1; bytes MLXAppCRC = 2;
+                          uint32 batteryVoltage_mV = 3; }
+message TPAdv          { int32 pressure = 1; sint32 temperature = 2;
+                          TPNotifyReason_E ... ; uint32 batteryVoltage_mV = 4;
+                          uint32 advertismentCount = 5; TPMSAdvType_E ... = 6; }
+enum TPDataRequest_E   { ... TP_DATAREQUEST_PRESSURE_TEMPERATURE = 1; ... }
+```
+
+The car sends a `TPDataRequest` on `0212`; the sensor answers with `TPData` (and
+`TPWheelUnitInfo` for battery) as an indication on `0213`. There is no
+encryption on this exchange — enrolment is by MAC allowlist plus a drive-based
+"auto-learn" — but nothing replies until a request is written, and the sensor
+drops an idle connection after about 15 seconds.
+
+Note `TPData.pressure` is a plain kPa-ish integer here (`101` in a captured
+example), a *different* encoding from the advertisement's `raw − 100` kPa. The
+two paths do not share units.
+
+**Why this matters for Home Assistant.** HA's Bluetooth stack is built around
+advertisements; it does not run this request/response protocol, and this
+integration does not either. So the advertisement path is the only one available
+without a bespoke GATT client — and it yields pressure *only from awake frames*.
+The read-only `tools/tpms_gatt.py` connects and listens on `0213` to test
+whether a sensor will surrender a reading over a connection at all.
+
 ## Open questions
 
-- What an awake frame from an Autel sensor looks like. Only sleep frames have
-  been captured so far. The awake layout above still rests on the upstream
-  sketch alone.
+- What an awake frame from these Autel sensors looks like on air. Every capture
+  so far — Home Assistant diagnostics, and nRF Connect point-blank on all four
+  units while parked — has shown only the 3-byte sleep frame `01 fe 03`. No
+  8-byte awake advertisement has yet been observed from *these* units; the awake
+  layout above still rests on the upstream sketch's sensors alone. It is not yet
+  settled whether these units broadcast pressure when awake (a range/timing
+  problem in the vehicle) or only ever hand it out over a GATT connection.
 - Bytes 0 and 1 are not understood. In sleep frames they were `01 FE` on all
   four sensors, so they are not a sensor ID. They are exposed as raw
   diagnostics; if you see them vary in an interesting way, that is worth writing
