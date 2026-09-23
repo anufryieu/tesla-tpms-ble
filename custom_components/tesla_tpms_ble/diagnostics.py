@@ -7,6 +7,10 @@ road. This one keeps every distinct payload the sensor has sent since Home
 Assistant started, with counts and timestamps, which is what you need to answer
 "does this sensor ever broadcast a reading?".
 
+``other_addresses`` covers the case where it does, but from an address no
+sensor is set up for: every Tesla-looking advertisement from elsewhere is kept
+there, shared across all sensors.
+
 Download it from the device page: **⋮ -> Download diagnostics**.
 """
 from __future__ import annotations
@@ -24,8 +28,10 @@ from .const import (
     DEFAULT_PROFILE,
     DEFAULT_TEMPERATURE_TRIM,
     DOMAIN,
+    WATCHER,
 )
 from .parser import TeslaTPMSBluetoothDeviceData
+from .watcher import UnknownAddressWatcher
 
 
 async def async_get_config_entry_diagnostics(
@@ -61,4 +67,8 @@ async def async_get_config_entry_diagnostics(
         last_update.isoformat() if last_update else None
     )
     diagnostics["payload_history"] = data.history.as_dict()
+
+    watcher: UnknownAddressWatcher | None = hass.data[DOMAIN].get(WATCHER)
+    if watcher is not None:
+        diagnostics["other_addresses"] = watcher.as_dict()
     return diagnostics

@@ -8,6 +8,7 @@ coordinator expects.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Final
 
@@ -33,9 +34,35 @@ _LOGGER = logging.getLogger(__name__)
 # on every frame from growing this without bound.
 MAX_DISTINCT_PAYLOADS: Final[int] = 32
 
+# How many forwarded advertisements to keep in time order. Home Assistant only
+# forwards one when the content changes or the sensor comes back after being
+# away, so this covers days of parking and driving, not seconds.
+MAX_TIMELINE_EVENTS: Final[int] = 64
+
+# Every sensor fitted so far has a Texas Instruments address in this block.
+SENSOR_ADDRESS_PREFIX: Final[str] = "BC:6A:29"
+
+
+def describe_advertisement(service_info: BluetoothServiceInfo) -> str:
+    """Summarise an advertisement that carries no Tesla manufacturer data.
+
+    An awake sensor that moved its reading somewhere else -- another company
+    ID, service data -- would otherwise be dropped without a trace.
+    """
+    parts = [
+        f"mfr {company:#06x}: {data.hex()}"
+        for company, data in sorted(service_info.manufacturer_data.items())
+    ]
+    parts += [
+        f"svc {uuid}: {data.hex()}"
+        for uuid, data in sorted(service_info.service_data.items())
+    ]
+    parts += [f"uuid {uuid}" for uuid in sorted(service_info.service_uuids)]
+    return "; ".join(parts) or "empty advertisement"
+
 
 class PayloadHistory:
-    """Remember every distinct manufacturer payload a sensor has sent.
+    """Remember every distinct advertisement payload a sensor has sent.
 
     Home Assistant's own Bluetooth diagnostics keep only the *latest*
     advertisement per device, which is close to useless for a TPMS sensor: it
@@ -49,6 +76,15 @@ class PayloadHistory:
     question this was written for: anything above
     :data:`~.decoder.MIN_PAYLOAD_LEN` means a real reading reached us.
 
+    Home Assistant does not forward every radio frame. It drops an
+    advertisement identical to the previous one from the same device, so a
+    parked sensor repeating ``01 fe 03`` once a second is forwarded once, and
+    again only after it has been out of range long enough to be forgotten.
+    Counts are therefore *forwarded* advertisements -- roughly "times the
+    sensor reappeared or changed" -- not frames on air. The ``timeline`` keeps
+    them in order with the gap since the previous one, so a drive shows up as
+    a long gap followed by whatever the sensor sent when it came back.
+
     The history lives in memory only, so it starts empty after a Home Assistant
     restart. ``started`` records when, so a diagnostic is never read as covering
     more time than it does.
@@ -56,23 +92,47 @@ class PayloadHistory:
 
     def __init__(self) -> None:
         """Start an empty history."""
-        self._entries: dict[bytes, dict[str, Any]] = {}
+        self._entries: dict[bytes | str, dict[str, Any]] = {}
+        self._timeline: deque[dict[str, Any]] = deque(maxlen=MAX_TIMELINE_EVENTS)
+        self._last_seen: datetime | None = None
         self.started = datetime.now(timezone.utc)
-        self.total_frames = 0
+        self.total_forwarded = 0
         self.distinct_dropped = 0
 
     def record(
         self,
-        payload: bytes,
+        payload: bytes | str,
         rssi: int | None,
         accepted: bool,
         note: str,
+        source: str | None = None,
     ) -> None:
-        """Record one advertisement payload and how the decoder judged it."""
-        self.total_frames += 1
-        now = datetime.now(timezone.utc)
-        entry = self._entries.get(payload)
+        """Record one forwarded advertisement and how the decoder judged it.
 
+        ``payload`` is the Tesla manufacturer data, or a text summary from
+        :func:`describe_advertisement` when the advertisement had none.
+        """
+        self.total_forwarded += 1
+        now = datetime.now(timezone.utc)
+        shown = payload.hex() if isinstance(payload, bytes) else payload
+
+        self._timeline.append(
+            {
+                "time": now.isoformat(),
+                "gap_seconds": (
+                    round((now - self._last_seen).total_seconds())
+                    if self._last_seen
+                    else None
+                ),
+                "payload": shown,
+                "note": note,
+                "rssi": rssi,
+                "source": source,
+            }
+        )
+        self._last_seen = now
+
+        entry = self._entries.get(payload)
         if entry is None:
             if len(self._entries) >= MAX_DISTINCT_PAYLOADS:
                 # Better to lose the newest oddity than to grow without bound;
@@ -80,18 +140,23 @@ class PayloadHistory:
                 self.distinct_dropped += 1
                 return
             entry = self._entries[payload] = {
-                "hex": payload.hex(),
-                "length": len(payload),
+                "hex": payload.hex() if isinstance(payload, bytes) else None,
+                "length": len(payload) if isinstance(payload, bytes) else None,
                 "first_seen": now.isoformat(),
                 "count": 0,
                 "rssi_min": rssi,
                 "rssi_max": rssi,
+                "sources": [],
             }
+            if not isinstance(payload, bytes):
+                entry["advertisement"] = payload
 
         entry["count"] += 1
         entry["last_seen"] = now.isoformat()
         entry["accepted"] = accepted
         entry["note"] = note
+        if source is not None and source not in entry["sources"]:
+            entry["sources"].append(source)
         if rssi is not None:
             for key, better in (("rssi_min", min), ("rssi_max", max)):
                 current = entry[key]
@@ -100,7 +165,9 @@ class PayloadHistory:
     @property
     def max_payload_len(self) -> int:
         """Longest payload seen. Above ``MIN_PAYLOAD_LEN`` means a reading."""
-        return max((len(p) for p in self._entries), default=0)
+        return max(
+            (len(p) for p in self._entries if isinstance(p, bytes)), default=0
+        )
 
     def as_dict(self) -> dict[str, Any]:
         """Render the history for a diagnostics download."""
@@ -110,7 +177,12 @@ class PayloadHistory:
         saw_reading = self.max_payload_len >= MIN_PAYLOAD_LEN
         return {
             "history_started": self.started.isoformat(),
-            "total_frames": self.total_frames,
+            "advertisements_forwarded": self.total_forwarded,
+            "counting_note": (
+                "Home Assistant forwards an advertisement only when it differs "
+                "from the previous one or the sensor reappears after being out "
+                "of range, so counts are appearances, not frames on air."
+            ),
             "distinct_payloads": len(self._entries),
             "distinct_dropped": self.distinct_dropped,
             "max_payload_len": self.max_payload_len,
@@ -125,6 +197,7 @@ class PayloadHistory:
                 "reading in its advertisement at all."
             ),
             "payloads": payloads,
+            "timeline": list(self._timeline),
         }
 
 
@@ -189,22 +262,30 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
 
     def _start_update(self, service_info: BluetoothServiceInfo) -> None:
         """Update from a BLE advertisement."""
-        manufacturer_data = service_info.manufacturer_data
-        if not manufacturer_data:
-            return
-
-        payload = manufacturer_data.get(TESLA_COMPANY_ID)
-        if payload is None:
-            return
-
         # Record before judging: a frame rejected below is exactly the kind we
         # would otherwise never hear about.
         rssi = getattr(service_info, "rssi", None)
+        source = getattr(service_info, "source", None)
+
+        payload = service_info.manufacturer_data.get(TESLA_COMPANY_ID)
+        if payload is None:
+            # Only this sensor's address reaches us, so whatever it sent
+            # instead is worth keeping -- it may be where an awake reading went.
+            self.history.record(
+                describe_advertisement(service_info),
+                rssi,
+                accepted=False,
+                note="no Tesla manufacturer data",
+                source=source,
+            )
+            return
 
         if not looks_like_tesla_tpms(payload):
             # A Tesla *vehicle* advertises under the same company ID. Ignore it
             # rather than inventing a tyre out of the VCSEC beacon.
-            self.history.record(payload, rssi, accepted=False, note="not TPMS-shaped")
+            self.history.record(
+                payload, rssi, accepted=False, note="not TPMS-shaped", source=source
+            )
             _LOGGER.debug(
                 "Tesla company ID from %s but payload is not TPMS-shaped: %s",
                 service_info.address,
@@ -214,7 +295,9 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
 
         reading = decode(payload, self._profile)
         if reading is None:
-            self.history.record(payload, rssi, accepted=False, note="undecodable")
+            self.history.record(
+                payload, rssi, accepted=False, note="undecodable", source=source
+            )
             _LOGGER.debug(
                 "Undecodable Tesla TPMS payload from %s: %s",
                 service_info.address,
@@ -227,6 +310,7 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
             rssi,
             accepted=True,
             note="awake" if reading.awake else "asleep",
+            source=source,
         )
         _LOGGER.debug(
             "%s %s (status 0x%02X): %s",

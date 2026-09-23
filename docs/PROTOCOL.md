@@ -219,6 +219,12 @@ whether a sensor will surrender a reading over a connection at all.
   layout above still rests on the upstream sketch's sensors alone. It is not yet
   settled whether these units broadcast pressure when awake (a range/timing
   problem in the vehicle) or only ever hand it out over a GATT connection.
+  Payload histories from a Raspberry Pi adapter across two days of parking and
+  driving (integration 1.0.2) point at the second: two sensors were each
+  forwarded four times, always `01 fe 03`, with no other payload from their
+  addresses. Two blind spots remain, and 1.0.3 records both: an awake sensor
+  that advertises from another address (see `other_addresses` in the
+  diagnostics), and one that drops the `0x022B` manufacturer data while awake.
 - Bytes 0 and 1 are not understood. In sleep frames they were `01 FE` on all
   four sensors, so they are not a sensor ID. They are exposed as raw
   diagnostics; if you see them vary in an interesting way, that is worth writing

@@ -19,9 +19,11 @@ from .const import (
     DEFAULT_PROFILE,
     DEFAULT_TEMPERATURE_TRIM,
     DOMAIN,
+    WATCHER,
 )
 from .decoder import PROFILE_DEFAULT, PROFILES
 from .parser import TeslaTPMSBluetoothDeviceData
+from .watcher import UnknownAddressWatcher
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
@@ -46,6 +48,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][f"{entry.entry_id}_data"] = data
+
+    watcher: UnknownAddressWatcher = hass.data[DOMAIN].setdefault(
+        WATCHER, UnknownAddressWatcher()
+    )
+    watcher.configured.add(address)
+    watcher.start(hass)
     coordinator = hass.data[DOMAIN][
         entry.entry_id
     ] = PassiveBluetoothProcessorCoordinator(
@@ -82,4 +90,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         hass.data[DOMAIN].pop(entry.entry_id, None)
         hass.data[DOMAIN].pop(f"{entry.entry_id}_data", None)
+        watcher: UnknownAddressWatcher | None = hass.data[DOMAIN].get(WATCHER)
+        if watcher is not None:
+            watcher.configured.discard(entry.unique_id)
+            if not watcher.configured:
+                watcher.stop()
+                hass.data[DOMAIN].pop(WATCHER)
     return unload_ok
