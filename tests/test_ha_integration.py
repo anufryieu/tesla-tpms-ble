@@ -40,14 +40,20 @@ MANIFEST = (
 )
 
 
-def service_info(payload: bytes, company_id: int = TESLA_COMPANY_ID, name="tsTPMS"):
+def service_info(
+    payload: bytes,
+    company_id: int = TESLA_COMPANY_ID,
+    name="tsTPMS",
+    address=ADDRESS,
+    service_data=None,
+):
     return BluetoothServiceInfo(
         name=name,
-        address=ADDRESS,
+        address=address,
         rssi=-71,
-        manufacturer_data={company_id: payload},
+        manufacturer_data={company_id: payload} if payload is not None else {},
         service_uuids=[],
-        service_data={},
+        service_data=service_data or {},
         source="local",
     )
 
@@ -248,7 +254,7 @@ class TestPayloadHistory:
             device.update(service_info(REAL_SLEEP_FRAME))
 
         history = device.history.as_dict()
-        assert history["total_frames"] == 5
+        assert history["advertisements_forwarded"] == 5
         assert history["distinct_payloads"] == 1
         assert history["payloads"][0]["hex"] == "01fe03"
         assert history["payloads"][0]["count"] == 5
@@ -299,3 +305,96 @@ class TestPayloadHistory:
         history = device.history.as_dict()
         assert history["distinct_payloads"] == MAX_DISTINCT_PAYLOADS
         assert history["distinct_dropped"] == 10
+
+    def test_an_advert_without_tesla_data_is_recorded(self):
+        # If an awake sensor put its reading anywhere but company 0x022B, the
+        # parser used to return without a trace.
+        device = TeslaTPMSBluetoothDeviceData()
+        device.update(
+            service_info(
+                None, service_data={"00001122-0000-1000-8000-00805f9b34fb": b"\x01\x02"}
+            )
+        )
+
+        history = device.history.as_dict()
+        entry = history["payloads"][0]
+        assert entry["note"] == "no Tesla manufacturer data"
+        assert entry["hex"] is None
+        assert "00001122" in entry["advertisement"]
+        assert history["max_payload_len"] == 0
+
+    def test_timeline_keeps_order_gaps_and_source(self):
+        device = TeslaTPMSBluetoothDeviceData()
+        device.update(service_info(REAL_SLEEP_FRAME))
+        device.update(service_info(payload()))
+        device.update(service_info(REAL_SLEEP_FRAME))
+
+        timeline = device.history.as_dict()["timeline"]
+        assert [e["note"] for e in timeline] == ["asleep", "awake", "asleep"]
+        assert timeline[0]["gap_seconds"] is None
+        assert timeline[1]["gap_seconds"] is not None
+        assert timeline[1]["source"] == "local"
+        assert device.history.as_dict()["payloads"][0]["sources"] == ["local"]
+
+    def test_timeline_is_capped(self):
+        from custom_components.tesla_tpms_ble.parser import MAX_TIMELINE_EVENTS
+
+        device = TeslaTPMSBluetoothDeviceData()
+        for _ in range(MAX_TIMELINE_EVENTS + 5):
+            device.update(service_info(REAL_SLEEP_FRAME))
+        assert len(device.history.as_dict()["timeline"]) == MAX_TIMELINE_EVENTS
+
+
+class TestUnknownAddressWatcher:
+    """Tesla-looking adverts from addresses no sensor is set up for."""
+
+    def watcher(self):
+        from custom_components.tesla_tpms_ble.watcher import UnknownAddressWatcher
+
+        w = UnknownAddressWatcher()
+        w.configured.add(ADDRESS)
+        return w
+
+    def test_configured_address_is_left_to_its_entry(self):
+        w = self.watcher()
+        w._async_advertisement(service_info(payload()), None)
+        assert w.as_dict()["addresses"] == {}
+
+    def test_awake_frame_from_another_address_is_kept(self):
+        w = self.watcher()
+        other = "5A:11:22:33:44:55"
+        w._async_advertisement(service_info(payload(), address=other), None)
+
+        seen = w.as_dict()["addresses"][other]
+        assert seen["name"] == "tsTPMS"
+        assert seen["saw_a_full_length_frame"] is True
+        assert seen["payloads"][0]["note"] == "awake"
+
+    def test_sensor_address_block_is_kept_without_tesla_data(self):
+        w = self.watcher()
+        other = "BC:6A:29:00:00:01"
+        w._async_advertisement(service_info(None, address=other), None)
+        assert w.as_dict()["addresses"][other]["payloads"][0]["note"] == (
+            "no Tesla manufacturer data"
+        )
+
+    def test_unrelated_devices_are_ignored(self):
+        w = self.watcher()
+        w._async_advertisement(
+            service_info(payload(), company_id=0x004C, address="11:22:33:44:55:66"),
+            None,
+        )
+        assert w.as_dict()["addresses"] == {}
+
+    def test_addresses_are_capped(self):
+        from custom_components.tesla_tpms_ble.watcher import MAX_WATCHED_ADDRESSES
+
+        w = self.watcher()
+        for i in range(MAX_WATCHED_ADDRESSES + 3):
+            w._async_advertisement(
+                service_info(REAL_SLEEP_FRAME, address=f"5A:00:00:00:00:{i:02X}"),
+                None,
+            )
+        d = w.as_dict()
+        assert len(d["addresses"]) == MAX_WATCHED_ADDRESSES
+        assert d["addresses_dropped"] == 3

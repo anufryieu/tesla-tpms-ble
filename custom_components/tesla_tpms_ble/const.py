@@ -2,6 +2,9 @@
 
 DOMAIN = "tesla_tpms_ble"
 
+# hass.data[DOMAIN] key for the one watcher shared by every config entry.
+WATCHER = "unknown_address_watcher"
+
 CONF_PROFILE = "profile"
 DEFAULT_PROFILE = "default"
 

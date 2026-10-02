@@ -169,8 +169,8 @@ counts and timestamps:
 "max_payload_len": 8,
 "saw_a_full_length_frame": true,
 "payloads": [
-  { "hex": "01fe03",           "count": 320, "note": "asleep" },
-  { "hex": "01020a860148ea0b", "count": 3,   "note": "awake"  }
+  { "hex": "01fe03",           "count": 4,   "note": "asleep" },
+  { "hex": "01020a860148ea0b", "count": 1,   "note": "awake"  }
 ]
 ```
 
@@ -184,6 +184,24 @@ long gone. The payload history keeps it.
   advertisement at all.
 - a full-length frame present but `"accepted": false` — it reached us and the
   integration rejected it. That is a bug worth an issue; include the `hex`.
+
+The counts are small, and that is expected. Home Assistant only forwards an
+advertisement when it differs from the previous one from that device, or when
+the device comes back after being out of range long enough to be forgotten. A
+parked sensor repeating `01 fe 03` every second is forwarded once. So a `count`
+of 4 means "reappeared four times", not "four frames on air".
+
+`timeline` lists the last 64 forwarded advertisements in order, with
+`gap_seconds` since the previous one and the adapter or proxy that heard it
+(`source`). A drive shows up as a long gap followed by whatever the sensor sent
+when the car came back into range. Compare those times with when you actually
+left and arrived: if the first thing heard on arrival is already `01fe03`, the
+sensor was not advertising a reading even while it was still rolling.
+
+`other_addresses` is shared by all sensors. It keeps every advertisement with
+the Tesla company ID, or from the `BC:6A:29` address block, from an address that
+is *not* set up as a sensor. If a sensor sends its reading from a different
+address while it is awake, that is the only place it will appear.
 
 **Readings look wrong**
 See [CALIBRATION.md](CALIBRATION.md). There are two decoding profiles and
