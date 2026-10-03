@@ -3,18 +3,25 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.bluetooth import BluetoothScanningMode
-from homeassistant.components.bluetooth.passive_update_processor import (
-    PassiveBluetoothProcessorCoordinator,
+from homeassistant.components.bluetooth import (
+    BluetoothScanningMode,
+    BluetoothServiceInfoBleak,
+)
+from homeassistant.components.bluetooth.active_update_processor import (
+    ActiveBluetoothProcessorCoordinator,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 
+from .connection import TeslaTpmsConnection
 from .const import (
+    CONF_CONNECT,
     CONF_PRESSURE_TRIM,
     CONF_PROFILE,
     CONF_TEMPERATURE_TRIM,
+    CONNECT_POLL_INTERVAL,
+    DEFAULT_CONNECT,
     DEFAULT_PRESSURE_TRIM,
     DEFAULT_PROFILE,
     DEFAULT_TEMPERATURE_TRIM,
@@ -54,14 +61,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     watcher.configured.add(address)
     watcher.start(hass)
+
+    connection = TeslaTpmsConnection()
+    hass.data[DOMAIN][f"{entry.entry_id}_connection"] = connection
+
+    def _needs_poll(
+        service_info: BluetoothServiceInfoBleak, last_poll: float | None
+    ) -> bool:
+        # Read the option live so the toggle takes effect without a reload.
+        if not entry.options.get(CONF_CONNECT, DEFAULT_CONNECT):
+            return False
+        # Don't open connections while Home Assistant is still starting up.
+        if hass.state is not CoreState.running:
+            return False
+        return last_poll is None or last_poll >= CONNECT_POLL_INTERVAL
+
+    async def _poll(service_info: BluetoothServiceInfoBleak):
+        reading = await connection.async_poll(hass, service_info)
+        return data.update_from_connection(reading, service_info)
+
     coordinator = hass.data[DOMAIN][
         entry.entry_id
-    ] = PassiveBluetoothProcessorCoordinator(
+    ] = ActiveBluetoothProcessorCoordinator(
         hass,
         _LOGGER,
         address=address,
         mode=BluetoothScanningMode.PASSIVE,
         update_method=data.update,
+        needs_poll_method=_needs_poll,
+        poll_method=_poll,
+        connectable=False,
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -90,6 +119,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         hass.data[DOMAIN].pop(entry.entry_id, None)
         hass.data[DOMAIN].pop(f"{entry.entry_id}_data", None)
+        hass.data[DOMAIN].pop(f"{entry.entry_id}_connection", None)
         watcher: UnknownAddressWatcher | None = hass.data[DOMAIN].get(WATCHER)
         if watcher is not None:
             watcher.configured.discard(entry.unique_id)

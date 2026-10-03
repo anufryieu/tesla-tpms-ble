@@ -215,6 +215,15 @@ exchange — trying the documented candidate framings and reporting which, if an
 draws a `TPData` reply. If one does, that frame is what a connection-based
 reader in the integration would send.
 
+Since 1.0.4 the integration can do this itself: the optional **Read over a
+connection** switch turns the passive coordinator into an active one that, when
+a connectable path exists, periodically connects and writes a `TPDataRequest`,
+parses the `TPData` indication, and feeds pressure and temperature into the same
+entities. It tries the same candidate framings and remembers the one that
+works. `TPData.pressure` is decoded as whole kPa, not through a `DecodeProfile`,
+because it is a different encoding from the advertisement. The decode lives in
+`decode_tpdata()` in `decoder.py`; the connection handling in `connection.py`.
+
 ## Open questions
 
 - What an awake frame from these Autel sensors looks like on air. Every capture
