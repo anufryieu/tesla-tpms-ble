@@ -18,9 +18,11 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
+    CONF_CONNECT,
     CONF_PRESSURE_TRIM,
     CONF_PROFILE,
     CONF_TEMPERATURE_TRIM,
+    DEFAULT_CONNECT,
     DEFAULT_PRESSURE_TRIM,
     DEFAULT_PROFILE,
     DEFAULT_TEMPERATURE_TRIM,
@@ -145,6 +147,10 @@ class TeslaTPMSOptionsFlow(OptionsFlow):
                             CONF_TEMPERATURE_TRIM, DEFAULT_TEMPERATURE_TRIM
                         ),
                     ): vol.Coerce(float),
+                    vol.Optional(
+                        CONF_CONNECT,
+                        default=options.get(CONF_CONNECT, DEFAULT_CONNECT),
+                    ): bool,
                 }
             ),
         )

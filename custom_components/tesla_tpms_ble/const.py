@@ -13,3 +13,14 @@ DEFAULT_PRESSURE_TRIM = 0.0
 
 CONF_TEMPERATURE_TRIM = "temperature_trim"
 DEFAULT_TEMPERATURE_TRIM = 0.0
+
+# Opt-in: actively connect to the sensor and ask for a reading over GATT, for
+# sensors that never put one in their advertisement. Off by default -- it opens
+# a connection (which costs the sensor a little battery) and needs a connectable
+# adapter or proxy, and the request framing is still experimental.
+CONF_CONNECT = "connect"
+DEFAULT_CONNECT = False
+
+# Don't poll more often than this many seconds, even though an advertisement
+# (the poll trigger) may arrive more frequently.
+CONNECT_POLL_INTERVAL = 300.0

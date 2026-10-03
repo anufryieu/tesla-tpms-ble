@@ -203,6 +203,31 @@ the Tesla company ID, or from the `BC:6A:29` address block, from an address that
 is *not* set up as a sensor. If a sensor sends its reading from a different
 address while it is awake, that is the only place it will appear.
 
+**Pressure is missing because the sensor never advertises a reading**
+Some sensors — the fitted Autel units tested so far among them — only ever
+broadcast the sleep frame, even on the road, and hand pressure out only over a
+connection, the way a car reads them. For those, enable **Read over a
+connection** under **Configure** on the device. Home Assistant then connects
+periodically and asks the sensor for pressure and temperature (a `TPDataRequest`
+on the Tesla service), exactly what a car does on the normal read path — it does
+not enrol, bond, or change the sensor.
+
+This is **experimental and off by default**:
+
+- It needs a *connectable* path to the sensor: a local Bluetooth adapter, or an
+  ESPHome proxy with active connections enabled. A passive-only proxy cannot
+  open a connection, and the poll will do nothing.
+- The exact request framing is not yet confirmed, so the integration tries a few
+  documented encodings on the first poll and remembers whichever the sensor
+  answers. `connection.learned_request` in the diagnostics shows the winner (and
+  `last_poll_successful` whether the most recent poll worked). If no framing ever
+  works, find one with `tools/tpms_gatt.py --request` and nothing passive will
+  help.
+- Pressure from a connection is decoded as whole kPa — a different encoding from
+  the advertisement — so trim it against a gauge if needed.
+- Connecting costs the sensor a little battery, so it polls at most every few
+  minutes, only when the sensor is in range.
+
 **Readings look wrong**
 See [CALIBRATION.md](CALIBRATION.md). There are two decoding profiles and
 per-sensor trim offsets under **Configure** on each device. Do not reinstall —

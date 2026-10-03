@@ -303,3 +303,143 @@ def decode_full_advertisement(
     if idx != -1:
         return decode(data[idx + 2 :], profile)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Connection path: TPDataRequest / TPData over the Tesla VCSEC GATT service.
+#
+# A car does not read pressure from the advertisement. It opens a GATT
+# connection to the sensor, writes a ``TPDataRequest`` to characteristic 0212,
+# and the sensor answers with a ``TPData`` message as an indication on 0213:
+#
+#     enum TPDataRequest_E { ... TP_DATAREQUEST_PRESSURE_TEMPERATURE = 1; ... }
+#     message TPData       { int32 pressure = 1; sint32 temperature = 2; }
+#
+# ``TPData.pressure`` is a different encoding from the advertisement: the one
+# captured value was a plain kPa-ish integer (101), not the advertisement's
+# ``raw - 100``. The two paths do not share units, so this is decoded as whole
+# kPa rather than through a :class:`DecodeProfile`.
+#
+# The exact VCSEC framing around the request is not public, so several
+# documented candidate encodings are offered; a caller tries them in turn.
+# ---------------------------------------------------------------------------
+
+#: Inner TPDataRequest asking for pressure + temperature: field 1 (varint) = 1.
+_TPDATA_REQUEST_INNER: Final[bytes] = bytes([0x08, 0x01])
+
+
+def build_tpdata_requests() -> list[bytes]:
+    """Return candidate TPDataRequest frames to write to 0212, simplest first.
+
+    The inner message is almost certainly a single enum field set to 1
+    (``08 01`` on the wire). What wraps it is unknown, so this offers it bare,
+    nested as an outer length-delimited field 1/2/3, and each of those again
+    behind a 2-byte big-endian length prefix. None enrol, bond, or carry a
+    certificate; an unrecognised frame is simply ignored by the sensor.
+    """
+    inner = _TPDATA_REQUEST_INNER
+    frames = [inner]
+    for field_tag in (0x0A, 0x12, 0x1A):  # outer field 1 / 2 / 3, wiretype 2
+        frames.append(bytes([field_tag, len(inner)]) + inner)
+    return frames + [len(f).to_bytes(2, "big") + f for f in list(frames)]
+
+
+def _read_varint(data: bytes, i: int) -> tuple[int, int] | None:
+    """Read a base-128 varint at ``data[i]``; return (value, next_index)."""
+    shift = 0
+    value = 0
+    while i < len(data):
+        byte = data[i]
+        value |= (byte & 0x7F) << shift
+        i += 1
+        if not byte & 0x80:
+            return value, i
+        shift += 7
+        if shift > 63:  # runaway: not a real varint
+            return None
+    return None
+
+
+def _collect_protobuf(data: bytes) -> tuple[dict[int, int], list[bytes]]:
+    """Walk one protobuf message: return its varint fields and sub-messages.
+
+    Returns ``({field_number: varint_value}, [length_delimited_payloads])``.
+    Unknown wire types abort the walk -- a half-parsed message is not trusted.
+    """
+    varints: dict[int, int] = {}
+    submessages: list[bytes] = []
+    i = 0
+    n = len(data)
+    while i < n:
+        key = _read_varint(data, i)
+        if key is None:
+            break
+        tag, i = key
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+        if wire_type == 0:  # varint
+            got = _read_varint(data, i)
+            if got is None:
+                break
+            varints[field_number], i = got
+        elif wire_type == 2:  # length-delimited
+            got = _read_varint(data, i)
+            if got is None:
+                break
+            length, i = got
+            if i + length > n:
+                break
+            submessages.append(data[i : i + length])
+            i += length
+        elif wire_type == 5:  # 32-bit
+            i += 4
+        elif wire_type == 1:  # 64-bit
+            i += 8
+        else:  # groups / unknown -- give up rather than guess
+            break
+    return varints, submessages
+
+
+def _unzigzag(value: int) -> int:
+    """Decode a protobuf ``sint32`` zigzag varint to a signed int."""
+    return (value >> 1) ^ -(value & 1)
+
+
+def decode_tpdata(payload: bytes | bytearray) -> TeslaTpmsReading | None:
+    """Decode a ``TPData`` indication received over the GATT connection.
+
+    ``payload`` is the raw bytes of one indication on characteristic 0213. The
+    message may be a bare ``TPData`` or wrapped in one outer message; both are
+    handled. Returns ``None`` if no plausible pressure field is found.
+    """
+    data = bytes(payload)
+    varints, submessages = _collect_protobuf(data)
+    if 1 not in varints:
+        # Wrapped: descend into the first sub-message that has a varint field 1.
+        for sub in submessages:
+            inner_varints, _ = _collect_protobuf(sub)
+            if 1 in inner_varints:
+                varints = inner_varints
+                break
+    if 1 not in varints:
+        return None
+
+    pressure_kpa = varints[1]
+    # Guard against a mis-parse turning random bytes into a "reading".
+    if not 0 <= pressure_kpa <= 100_000:
+        return None
+
+    raw: dict[str, int] = {"gatt_pressure": pressure_kpa}
+    temperature_c: float | None = None
+    if 2 in varints:
+        temperature_c = float(_unzigzag(varints[2]))
+        raw["gatt_temperature"] = varints[2]
+
+    return TeslaTpmsReading(
+        awake=True,
+        status=STATUS_AWAKE_MIN,
+        pressure_bar=round(pressure_kpa / 100.0, 3),
+        temperature_c=temperature_c,
+        raw=raw,
+        profile="connection",
+    )

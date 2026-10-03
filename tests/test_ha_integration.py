@@ -3,6 +3,7 @@
 Skipped automatically if Home Assistant is not installed, so the pure decoder
 tests still run anywhere.
 """
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -398,3 +399,105 @@ class TestUnknownAddressWatcher:
         d = w.as_dict()
         assert len(d["addresses"]) == MAX_WATCHED_ADDRESSES
         assert d["addresses_dropped"] == 3
+
+
+class TestConnectionUpdate:
+    """update_from_connection() turns a GATT reading into entities."""
+
+    def _reading(self):
+        from custom_components.tesla_tpms_ble.decoder import decode_tpdata
+
+        return decode_tpdata(bytes.fromhex("08ad021028"))  # 301 kPa, 20 C
+
+    def test_connection_reading_publishes_pressure_and_temperature(self):
+        data = TeslaTPMSBluetoothDeviceData()
+        update = data.update_from_connection(self._reading(), service_info(b"\x01\x02"))
+        v = values(update)
+        assert v[TPMSSensor.PRESSURE] == pytest.approx(3.01)
+        assert v[TPMSSensor.TEMPERATURE] == pytest.approx(20.0)
+        assert v[TPMSSensor.RAW_PRESSURE] == 301
+        assert v[TPMSSensor.RAW_TEMPERATURE] == 40
+        assert binary_values(update)[TPMSBinarySensor.AWAKE] is True
+        # STATUS is an advertisement-only byte; a connection update must not set it.
+        assert TPMSSensor.STATUS not in v
+
+    def test_connection_reading_honours_trim(self):
+        data = TeslaTPMSBluetoothDeviceData(pressure_trim=0.1, temperature_trim=-2.0)
+        v = values(data.update_from_connection(self._reading(), service_info(b"\x01")))
+        assert v[TPMSSensor.PRESSURE] == pytest.approx(3.11)
+        assert v[TPMSSensor.TEMPERATURE] == pytest.approx(18.0)
+
+
+class _FakeChar:
+    def __init__(self, props):
+        self.properties = props
+
+
+class _FakeServices:
+    def __init__(self, char):
+        self._char = char
+
+    def get_characteristic(self, uuid):
+        return self._char
+
+
+class _FakeClient:
+    """Minimal BleakClient stand-in that replies to one known request frame."""
+
+    def __init__(self, answers_to: bytes | None, reply: bytes, props=("write",)):
+        self._answers_to = answers_to
+        self._reply = reply
+        self.services = _FakeServices(_FakeChar(list(props)))
+        self._cb = None
+        self.writes: list[bytes] = []
+
+    async def start_notify(self, uuid, cb):
+        self._cb = cb
+
+    async def write_gatt_char(self, uuid, data, response=True):
+        self.writes.append(bytes(data))
+        if self._answers_to is not None and bytes(data) == self._answers_to:
+            self._cb(0, bytearray(self._reply))
+
+    async def stop_notify(self, uuid):
+        pass
+
+
+class TestConnectionRequest:
+    """TeslaTpmsConnection._async_request: write candidates, parse the reply."""
+
+    def test_learns_the_frame_that_gets_a_reply(self):
+        from custom_components.tesla_tpms_ble.connection import TeslaTpmsConnection
+
+        # Sensor answers only the "wrapped as field 1" framing.
+        reply = bytes.fromhex("08ad021028")
+        client = _FakeClient(answers_to=bytes.fromhex("0a020801"), reply=reply)
+        conn = TeslaTpmsConnection()
+        reading = asyncio.run(conn._async_request(client))
+
+        assert reading.pressure_bar == pytest.approx(3.01)
+        assert conn.learned_request == "0a020801"
+        # Once learned, a second poll writes only that one frame.
+        client2 = _FakeClient(answers_to=bytes.fromhex("0a020801"), reply=reply)
+        asyncio.run(conn._async_request(client2))
+        assert client2.writes == [bytes.fromhex("0a020801")]
+
+    def test_no_reply_raises(self):
+        from custom_components.tesla_tpms_ble.connection import (
+            NoTPDataReply,
+            TeslaTpmsConnection,
+        )
+
+        client = _FakeClient(answers_to=None, reply=b"")
+        with pytest.raises(NoTPDataReply):
+            asyncio.run(TeslaTpmsConnection()._async_request(client))
+
+    def test_unwritable_characteristic_raises(self):
+        from custom_components.tesla_tpms_ble.connection import (
+            NoTPDataReply,
+            TeslaTpmsConnection,
+        )
+
+        client = _FakeClient(answers_to=None, reply=b"", props=("read",))
+        with pytest.raises(NoTPDataReply):
+            asyncio.run(TeslaTpmsConnection()._async_request(client))

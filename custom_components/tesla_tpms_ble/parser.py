@@ -17,12 +17,15 @@ from bluetooth_sensor_state_data import BluetoothData
 from home_assistant_bluetooth import BluetoothServiceInfo
 from sensor_state_data.enum import StrEnum
 
+from sensor_state_data import SensorUpdate
+
 from .decoder import (
     MIN_PAYLOAD_LEN,
     PROFILE_DEFAULT,
     PROFILES,
     TESLA_COMPANY_ID,
     DecodeProfile,
+    TeslaTpmsReading,
     decode,
     looks_like_tesla_tpms,
 )
@@ -382,3 +385,61 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
                 native_value=reading.battery_percent,
                 name="Battery",
             )
+
+    def update_from_connection(
+        self, reading: TeslaTpmsReading, service_info: BluetoothServiceInfo
+    ) -> SensorUpdate:
+        """Build a :class:`SensorUpdate` from a reading fetched over GATT.
+
+        The advertisement path (``update``) is driven by the coordinator; this
+        is its equivalent for the optional active poll. A connection reading is
+        always awake and carries pressure and temperature in the ``TPData``
+        encoding, which is *not* the advertisement's -- so ``RAW_PRESSURE`` /
+        ``RAW_TEMPERATURE`` here hold the GATT integers, and ``STATUS`` (an
+        advertisement-only byte) is left untouched.
+        """
+        self._events_updates.clear()
+        address = service_info.address
+        name = f"TPMS {short_address(address)}"
+        self.set_device_manufacturer("Tesla / Autel (BLE TPMS)")
+        self.set_device_type("BLE TPMS")
+        self.set_device_name(name)
+        self.set_title(name)
+
+        self.update_binary_sensor(
+            key=str(TPMSBinarySensor.AWAKE),
+            native_value=True,
+            name="Awake",
+        )
+        if reading.pressure_bar is not None:
+            self.update_sensor(
+                key=str(TPMSSensor.PRESSURE),
+                native_unit_of_measurement=None,
+                native_value=round(reading.pressure_bar + self._pressure_trim, 3),
+                name="Pressure",
+            )
+            if "gatt_pressure" in reading.raw:
+                self.update_sensor(
+                    key=str(TPMSSensor.RAW_PRESSURE),
+                    native_unit_of_measurement=None,
+                    native_value=reading.raw["gatt_pressure"],
+                    name="Raw pressure",
+                )
+        if reading.temperature_c is not None:
+            self.update_sensor(
+                key=str(TPMSSensor.TEMPERATURE),
+                native_unit_of_measurement=None,
+                native_value=round(reading.temperature_c + self._temperature_trim, 1),
+                name="Temperature",
+            )
+            if "gatt_temperature" in reading.raw:
+                self.update_sensor(
+                    key=str(TPMSSensor.RAW_TEMPERATURE),
+                    native_unit_of_measurement=None,
+                    native_value=reading.raw["gatt_temperature"],
+                    name="Raw temperature",
+                )
+
+        self._last_update_time = datetime.now(timezone.utc)
+        self.update_signal_strength(service_info.rssi)
+        return self._finish_update()

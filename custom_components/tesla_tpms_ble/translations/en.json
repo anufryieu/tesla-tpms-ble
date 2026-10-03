@@ -26,7 +26,11 @@
         "data": {
           "profile": "Decoding profile",
           "pressure_trim": "Pressure correction (bar)",
-          "temperature_trim": "Temperature correction (°C)"
+          "temperature_trim": "Temperature correction (°C)",
+          "connect": "Read over a connection (experimental)"
+        },
+        "data_description": {
+          "connect": "For sensors that never put a reading in their advertisement. Home Assistant connects to the sensor and asks for pressure and temperature, the way a car does. Needs a connectable adapter or proxy, uses a little sensor battery, and the request format is still being confirmed — leave off unless the advertisement shows no reading."
         }
       }
     }

@@ -20,10 +20,13 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .connection import TeslaTpmsConnection
 from .const import (
+    CONF_CONNECT,
     CONF_PRESSURE_TRIM,
     CONF_PROFILE,
     CONF_TEMPERATURE_TRIM,
+    DEFAULT_CONNECT,
     DEFAULT_PRESSURE_TRIM,
     DEFAULT_PROFILE,
     DEFAULT_TEMPERATURE_TRIM,
@@ -53,7 +56,18 @@ async def async_get_config_entry_diagnostics(
             "temperature_trim": entry.options.get(
                 CONF_TEMPERATURE_TRIM, DEFAULT_TEMPERATURE_TRIM
             ),
+            "connect": entry.options.get(CONF_CONNECT, DEFAULT_CONNECT),
         },
+    }
+
+    connection: TeslaTpmsConnection | None = hass.data.get(DOMAIN, {}).get(
+        f"{entry.entry_id}_connection"
+    )
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    diagnostics["connection"] = {
+        "enabled": entry.options.get(CONF_CONNECT, DEFAULT_CONNECT),
+        "learned_request": connection.learned_request if connection else None,
+        "last_poll_successful": getattr(coordinator, "last_poll_successful", None),
     }
 
     if data is None:

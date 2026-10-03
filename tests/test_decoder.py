@@ -11,8 +11,10 @@ from decoder import (  # noqa: E402
     PROFILE_LEGACY,
     TESLA_COMPANY_ID,
     battery_percentage,
+    build_tpdata_requests,
     decode,
     decode_full_advertisement,
+    decode_tpdata,
     looks_like_tesla_tpms,
 )
 
@@ -225,3 +227,57 @@ class TestBatteryCurve:
         volts = [2.5 + i * 0.02 for i in range(50)]
         pcts = [battery_percentage(v) for v in volts]
         assert pcts == sorted(pcts)
+
+
+class TestTPDataRequests:
+    """Candidate TPDataRequest frames written to 0212 over a connection."""
+
+    def test_simplest_first_and_all_encode_the_enum(self):
+        frames = build_tpdata_requests()
+        assert frames[0] == bytes.fromhex("0801")  # bare: field 1 varint = 1
+        assert bytes.fromhex("0a020801") in frames  # wrapped as outer field 1
+        # Every candidate carries the 08 01 enum somewhere.
+        assert all(b"\x08\x01" in f for f in frames)
+        # The length-prefixed variants are the first set again, prefixed.
+        assert bytes.fromhex("00020801") in frames
+
+    def test_no_duplicates(self):
+        frames = build_tpdata_requests()
+        assert len(frames) == len(set(frames))
+
+
+class TestDecodeTPData:
+    """Decoding a TPData indication received on 0213."""
+
+    def test_bare_pressure_and_temperature(self):
+        # TPData{ pressure=101 (int32), temperature=20 (sint32 -> zigzag 40) }
+        reading = decode_tpdata(bytes.fromhex("08651028"))
+        assert reading is not None
+        assert reading.awake is True
+        assert reading.pressure_bar == 1.01  # 101 kPa read as whole kPa
+        assert reading.temperature_c == 20.0
+        assert reading.raw == {"gatt_pressure": 101, "gatt_temperature": 40}
+        assert reading.profile == "connection"
+
+    def test_negative_temperature_is_zigzag_decoded(self):
+        # temperature = -5 -> zigzag 9
+        reading = decode_tpdata(bytes.fromhex("08651009"))
+        assert reading.temperature_c == -5.0
+
+    def test_message_may_be_wrapped_in_one_outer_field(self):
+        reading = decode_tpdata(bytes.fromhex("0a0408651028"))
+        assert reading.pressure_bar == 1.01
+        assert reading.temperature_c == 20.0
+
+    def test_pressure_only(self):
+        reading = decode_tpdata(bytes.fromhex("08ad02"))  # 301 kPa, no temp field
+        assert reading.pressure_bar == 3.01
+        assert reading.temperature_c is None
+
+    def test_rejects_rubbish(self):
+        assert decode_tpdata(b"") is None
+        assert decode_tpdata(b"\xff\xff\xff") is None
+
+    def test_rejects_an_implausible_pressure(self):
+        # field 1 varint = 200000 kPa, far outside any real reading
+        assert decode_tpdata(bytes.fromhex("08c09a0c")) is None
