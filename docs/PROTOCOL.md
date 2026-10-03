@@ -207,8 +207,13 @@ two paths do not share units.
 advertisements; it does not run this request/response protocol, and this
 integration does not either. So the advertisement path is the only one available
 without a bespoke GATT client — and it yields pressure *only from awake frames*.
-The read-only `tools/tpms_gatt.py` connects and listens on `0213` to test
-whether a sensor will surrender a reading over a connection at all.
+`tools/tpms_gatt.py` connects and listens on `0213` to test whether a sensor
+will surrender a reading over a connection at all. By default it only listens;
+with `--request` it also writes a `TPDataRequest` to `0212` — the plain
+pressure/temperature read a car performs, not enrolment or the certificate
+exchange — trying the documented candidate framings and reporting which, if any,
+draws a `TPData` reply. If one does, that frame is what a connection-based
+reader in the integration would send.
 
 ## Open questions
 
@@ -219,12 +224,15 @@ whether a sensor will surrender a reading over a connection at all.
   layout above still rests on the upstream sketch's sensors alone. It is not yet
   settled whether these units broadcast pressure when awake (a range/timing
   problem in the vehicle) or only ever hand it out over a GATT connection.
-  Payload histories from a Raspberry Pi adapter across two days of parking and
-  driving (integration 1.0.2) point at the second: two sensors were each
-  forwarded four times, always `01 fe 03`, with no other payload from their
-  addresses. Two blind spots remain, and 1.0.3 records both: an awake sensor
-  that advertises from another address (see `other_addresses` in the
-  diagnostics), and one that drops the `0x022B` manufacturer data while awake.
+  Payload histories from a Raspberry Pi adapter across several days of parking
+  and driving (integrations 1.0.2 and 1.0.3) point at the second: all four
+  sensors reappear together after each drive and the first frame heard is always
+  the sleep frame `01 fe 03`, with no longer payload and no other address of
+  their own. 1.0.3 closed the two advertisement blind spots — an awake sensor
+  advertising from another address (`other_addresses` in the diagnostics) and
+  one dropping the `0x022B` manufacturer data while awake — and neither has
+  fired. The remaining way pressure could be reachable is the GATT connection a
+  car uses; `tools/tpms_gatt.py --request` tests that directly.
 - Bytes 0 and 1 are not understood. In sleep frames they were `01 FE` on all
   four sensors, so they are not a sensor ID. They are exposed as raw
   diagnostics; if you see them vary in an interesting way, that is worth writing
