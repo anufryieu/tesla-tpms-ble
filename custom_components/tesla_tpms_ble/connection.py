@@ -55,13 +55,22 @@ class TeslaTpmsConnection:
     """
 
     def __init__(self) -> None:
-        """Start with no known-good request frame."""
+        """Start with no known-good request frame and no history."""
         self._good_frame: bytes | None = None
+        # Debugging surface for diagnostics: what the sensor last sent back and
+        # why the last poll ended as it did. Populated on every poll attempt.
+        self.last_replies: list[str] = []
+        self.last_error: str | None = None
 
     @property
     def learned_request(self) -> str | None:
         """Hex of the request frame the sensor answered, once one has."""
         return self._good_frame.hex() if self._good_frame else None
+
+    @property
+    def last_reply(self) -> str | None:
+        """Hex of the last raw indication the sensor sent, for diagnostics."""
+        return self.last_replies[-1] if self.last_replies else None
 
     async def async_poll(
         self, hass: HomeAssistant, service_info: BluetoothServiceInfoBleak
@@ -69,23 +78,34 @@ class TeslaTpmsConnection:
         """Connect, request a reading, and return it.
 
         Raises :class:`NoTPDataReply` if the sensor is reachable but says
-        nothing, or :class:`BleakError` if it cannot be connected -- both of
-        which the active coordinator treats as an ordinary failed poll.
+        nothing decodable, or :class:`BleakError` if it cannot be connected --
+        both of which the active coordinator treats as an ordinary failed poll.
+        The failure reason is also kept in ``last_error`` for the diagnostics.
         """
         address = service_info.address
         ble_device = async_ble_device_from_address(hass, address, connectable=True)
         if ble_device is None:
             # No connectable adapter or proxy can reach it; a passive-only proxy
             # cannot open a connection. Nothing to do until that changes.
-            raise NoTPDataReply(f"no connectable path to {address}")
+            self.last_error = f"no connectable path to {address}"
+            raise NoTPDataReply(self.last_error)
 
-        client = await establish_connection(
-            BleakClientWithServiceCache, ble_device, service_info.name or address
-        )
         try:
-            return await self._async_request(client)
+            client = await establish_connection(
+                BleakClientWithServiceCache, ble_device, service_info.name or address
+            )
+        except BleakError as exc:
+            self.last_error = f"connect failed: {exc}"
+            raise
+        try:
+            reading = await self._async_request(client)
+        except BleakError as exc:
+            self.last_error = str(exc)
+            raise
         finally:
             await client.disconnect()
+        self.last_error = None
+        return reading
 
     async def _async_request(self, client: BleakClientWithServiceCache) -> TeslaTpmsReading:
         """Subscribe to 0213, write request frame(s), parse the first reply."""
@@ -103,6 +123,7 @@ class TeslaTpmsConnection:
             got.append(bytes(data))
             reply.set()
 
+        answering_frame: bytes | None = None
         await client.start_notify(CHAR_INDICATE, on_indicate)
         try:
             frames = [self._good_frame] if self._good_frame else build_tpdata_requests()
@@ -111,24 +132,37 @@ class TeslaTpmsConnection:
             for frame in frames:
                 if loop.time() >= deadline:
                     break
+                before = len(got)
                 reply.clear()
                 await client.write_gatt_char(CHAR_WRITE, frame, response=with_response)
                 try:
                     await asyncio.wait_for(reply.wait(), timeout=_REPLY_TIMEOUT)
                 except TimeoutError:
                     continue
-                self._good_frame = frame
-                _LOGGER.debug("TPData reply to request %s", frame.hex())
-                break
+                # Only count an indication that arrived after this write, so an
+                # unsolicited one on connect is not mis-credited to a frame.
+                if len(got) > before:
+                    answering_frame = frame
+                    _LOGGER.debug(
+                        "indication after request %s: %s", frame.hex(), got[-1].hex()
+                    )
+                    break
         finally:
             try:
                 await client.stop_notify(CHAR_INDICATE)
             except BleakError:
                 pass
 
+        # Record what came back regardless of how it decodes, for diagnostics.
+        self.last_replies = [b.hex() for b in got]
+
         if not got:
-            raise NoTPDataReply("no TPData indication")
+            raise NoTPDataReply("connected, but no indication on 0213")
         reading = decode_tpdata(got[-1])
         if reading is None:
-            raise NoTPDataReply(f"undecodable TPData: {got[-1].hex()}")
+            # The sensor talks over GATT -- we just cannot read this yet. Keep
+            # the bytes (last_replies) so the format can be worked out.
+            raise NoTPDataReply(f"indecipherable reply: {got[-1].hex()}")
+        if answering_frame is not None:
+            self._good_frame = answering_frame
         return reading

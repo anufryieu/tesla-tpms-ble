@@ -492,6 +492,22 @@ class TestConnectionRequest:
         with pytest.raises(NoTPDataReply):
             asyncio.run(TeslaTpmsConnection()._async_request(client))
 
+    def test_undecodable_reply_is_kept_but_not_learned(self):
+        from custom_components.tesla_tpms_ble.connection import (
+            NoTPDataReply,
+            TeslaTpmsConnection,
+        )
+
+        # Sensor answers the first frame, but with bytes we cannot decode.
+        client = _FakeClient(answers_to=bytes.fromhex("0801"), reply=b"\xff\xff\xff")
+        conn = TeslaTpmsConnection()
+        with pytest.raises(NoTPDataReply):
+            asyncio.run(conn._async_request(client))
+        # The raw reply is kept for diagnostics, but no frame is "learned".
+        assert conn.last_reply == "ffffff"
+        assert conn.last_replies == ["ffffff"]
+        assert conn.learned_request is None
+
     def test_unwritable_characteristic_raises(self):
         from custom_components.tesla_tpms_ble.connection import (
             NoTPDataReply,
