@@ -68,6 +68,9 @@ async def async_get_config_entry_diagnostics(
         "enabled": entry.options.get(CONF_CONNECT, DEFAULT_CONNECT),
         "learned_request": connection.learned_request if connection else None,
         "last_poll_successful": getattr(coordinator, "last_poll_successful", None),
+        "last_reply": connection.last_reply if connection else None,
+        "last_replies": connection.last_replies if connection else [],
+        "last_error": connection.last_error if connection else None,
     }
 
     if data is None:
