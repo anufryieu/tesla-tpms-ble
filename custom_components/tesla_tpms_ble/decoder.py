@@ -318,8 +318,8 @@ def decode_full_advertisement(
 # Real replies from fitted sensors are ``TPData`` wrapped in two outer
 # messages (``field 2 -> field 28 -> {pressure, temperature}``); the decoder
 # searches in for the innermost message rather than assuming a flat layout.
-# ``TPData.pressure`` is a different encoding from the advertisement -- raw
-# units of about 0.08 psi, not the advertisement's ``raw - 100`` kPa -- so it
+# ``TPData.pressure`` is absolute pressure in whole kPa (confirmed against a
+# gauge, see below) -- unrelated to the advertisement's ``raw`` field -- so it
 # is decoded with its own scale rather than through a :class:`DecodeProfile`.
 #
 # The exact VCSEC framing around the request is not public, so several
@@ -428,13 +428,14 @@ def _find_tpdata_fields(data: bytes, depth: int = 0) -> tuple[int, int | None] |
     return None
 
 
-# TPData pressure scale. Four fitted sensors parked and cold reported raw
-# pressures of 523-542 with the nesting above; raw * 0.08 psi lands them at
-# 41.8-43.4 psi, i.e. right on a Model 3 / Y's 42 psi (2.9 bar) placard, and
-# the paired temperatures decoded to a plausible 18-19 C. 0.08 psi == this
-# many kPa per unit. Provisional until confirmed against a gauge; the raw
-# value is always exposed so the scale can be corrected without guessing.
-_GATT_KPA_PER_UNIT: Final[float] = 0.08 * _KPA_PER_PSI
+# TPData pressure is absolute pressure in whole kPa. This was pinned against a
+# reference: four fitted sensors read raw 523/527/538/542, and the owner's gauge
+# gave 62/62/63.5/64.5 psi -- i.e. gauge = (raw - 1 atm) kPa, matching all four
+# within the sensor's +-0.1 bar spec. It also matches the one public sample
+# (Synacktiv: a bench sensor at rest read 101, one atmosphere). So subtract one
+# standard atmosphere to convert the absolute reading to gauge pressure. The raw
+# kPa is still exposed as Raw pressure.
+_ATMOSPHERE_KPA: Final[float] = 101.325
 
 
 def decode_tpdata(payload: bytes | bytearray) -> TeslaTpmsReading | None:
@@ -460,10 +461,17 @@ def decode_tpdata(payload: bytes | bytearray) -> TeslaTpmsReading | None:
         temperature_c = float(_unzigzag(temperature_raw))
         raw["gatt_temperature"] = temperature_raw
 
+    # Absolute kPa -> gauge bar. A sensor at rest reads ~1 atm; clamp the small
+    # negative that sensor offset then produces to zero, as the advertisement
+    # path does.
+    pressure_bar = (pressure_raw - _ATMOSPHERE_KPA) / 100.0
+    if -0.2 < pressure_bar < 0.0:
+        pressure_bar = 0.0
+
     return TeslaTpmsReading(
         awake=True,
         status=STATUS_AWAKE_MIN,
-        pressure_bar=round(pressure_raw * _GATT_KPA_PER_UNIT / 100.0, 3),
+        pressure_bar=round(pressure_bar, 3),
         temperature_c=temperature_c,
         raw=raw,
         profile="connection",

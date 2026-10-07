@@ -249,18 +249,19 @@ class TestTPDataRequests:
 class TestDecodeTPData:
     """Decoding a TPData indication received on 0213."""
 
-    # Real replies captured from the four fitted Autel sensors (parked, cold).
+    # Real replies captured from the four fitted Autel sensors, with the owner's
+    # gauge reading alongside (gauge psi) -- this pinned the kPa-absolute scale.
     # Nesting: field 2 -> field 28 -> {field 1 = pressure, field 2 = temp}.
     REAL_REPLIES = {
-        "10F1": ("1208e20105089e041026", 542, 38, 19),
-        "1104": ("1208e20105089a041024", 538, 36, 18),
-        "10B2": ("1208e20105088f041026", 527, 38, 19),
-        "142E": ("1208e20105088b041024", 523, 36, 18),
+        "10F1": ("1208e20105089e041026", 542, 38, 19, 64.5),  # rear right
+        "1104": ("1208e20105089a041024", 538, 36, 18, 63.5),  # rear left
+        "10B2": ("1208e20105088f041026", 527, 38, 19, 62.0),  # front
+        "142E": ("1208e20105088b041024", 523, 36, 18, 62.0),  # front
     }
 
     @pytest.mark.parametrize("name", list(REAL_REPLIES))
     def test_real_captured_replies_decode(self, name):
-        hex_reply, raw_p, raw_t, temp_c = self.REAL_REPLIES[name]
+        hex_reply, raw_p, raw_t, temp_c, gauge_psi = self.REAL_REPLIES[name]
         reading = decode_tpdata(bytes.fromhex(hex_reply))
         assert reading is not None
         assert reading.awake is True
@@ -268,13 +269,14 @@ class TestDecodeTPData:
         assert reading.raw["gatt_pressure"] == raw_p
         assert reading.raw["gatt_temperature"] == raw_t
         assert reading.temperature_c == temp_c
-        # ~42 psi placard: raw * 0.08 psi -> bar.
-        assert reading.pressure_bar == pytest.approx(raw_p * 0.08 / 14.50377, abs=0.01)
+        # Absolute kPa -> gauge bar, matched to the gauge within sensor spec
+        # (+-0.1 bar ~= +-1.5 psi).
+        assert reading.pressure_psi == pytest.approx(gauge_psi, abs=1.5)
 
-    def test_pressure_lands_near_the_42_psi_placard(self):
-        # Sanity: a real capture should read ~2.9 bar, not absurdly off.
-        reading = decode_tpdata(bytes.fromhex("1208e20105088f041026"))
-        assert 2.5 < reading.pressure_bar < 3.3
+    def test_bench_sensor_at_one_atmosphere_reads_zero_gauge(self):
+        # Synacktiv's public sample: a sensor at rest reported pressure 101.
+        reading = decode_tpdata(bytes.fromhex("08651026"))  # field1 = 101
+        assert reading.pressure_bar == 0.0
 
     def test_negative_temperature_is_zigzag_decoded(self):
         # bare {pressure=527, temperature=-5 -> zigzag 9}

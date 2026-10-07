@@ -416,7 +416,7 @@ class TestConnectionUpdate:
         data = TeslaTPMSBluetoothDeviceData()
         update = data.update_from_connection(self._reading(), service_info(b"\x01\x02"))
         v = values(update)
-        assert v[TPMSSensor.PRESSURE] == pytest.approx(2.91, abs=0.01)
+        assert v[TPMSSensor.PRESSURE] == pytest.approx(4.26, abs=0.01)
         assert v[TPMSSensor.TEMPERATURE] == pytest.approx(19.0)
         assert v[TPMSSensor.RAW_PRESSURE] == 527
         assert v[TPMSSensor.RAW_TEMPERATURE] == 38
@@ -427,7 +427,7 @@ class TestConnectionUpdate:
     def test_connection_reading_honours_trim(self):
         data = TeslaTPMSBluetoothDeviceData(pressure_trim=0.1, temperature_trim=-2.0)
         v = values(data.update_from_connection(self._reading(), service_info(b"\x01")))
-        assert v[TPMSSensor.PRESSURE] == pytest.approx(3.01, abs=0.01)
+        assert v[TPMSSensor.PRESSURE] == pytest.approx(4.36, abs=0.01)
         assert v[TPMSSensor.TEMPERATURE] == pytest.approx(17.0)
 
 
@@ -479,7 +479,7 @@ class TestConnectionRequest:
         conn = TeslaTpmsConnection()
         reading = asyncio.run(conn._async_request(client))
 
-        assert reading.pressure_bar == pytest.approx(2.91, abs=0.01)
+        assert reading.pressure_bar == pytest.approx(4.26, abs=0.01)
         assert conn.learned_request == "0a020801"
         # Once learned, a second poll writes only that one frame.
         client2 = _FakeClient(answers_to=bytes.fromhex("0a020801"), reply=reply)

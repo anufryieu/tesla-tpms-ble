@@ -246,18 +246,27 @@ cold) reported:
 | 10B2   | 527 | 38 | 42.2 psi | 19 °C |
 | 142E   | 523 | 36 | 41.8 psi | 18 °C |
 
-Temperature is a plain `sint32` in whole °C (zigzag-decoded: `38 → 19`). For
-pressure, `raw × 0.08 psi` lands all four on a Model 3 / Y's 42 psi (2.9 bar)
-placard, so that is the working scale — provisional until confirmed against a
-gauge, which is why the raw value is always exposed. This differs from both the
-advertisement (`raw − 100` kPa) and the single public `TPData.pressure = 101`
-sample, so the paths genuinely do not share units.
+Temperature is a plain `sint32` in whole °C (zigzag-decoded: `38 → 19`).
+Pressure is **absolute pressure in whole kPa**, confirmed against a gauge: the
+sensors were on a camper, and the owner's readings were front 62 psi, rear
+63.5 / 64.5 psi. Subtracting one atmosphere (101.325 kPa) matches all four:
+
+| sensor | raw kPa | gauge (computed) | gauge (measured) |
+|--------|--------:|-----------------:|-----------------:|
+| 10F1 (RR) | 542 | 63.9 psi | 64.5 psi |
+| 1104 (RL) | 538 | 63.3 psi | 63.5 psi |
+| 10B2 (F)  | 527 | 61.7 psi | 62 psi |
+| 142E (F)  | 523 | 61.1 psi | 62 psi |
+
+All within the sensor's ±0.1 bar (±1.5 psi) spec. This also matches the single
+public `TPData.pressure = 101` sample — a bench sensor at one atmosphere, i.e.
+zero gauge. So `gauge_kPa = raw − 101.325`, a different encoding from the
+advertisement's `raw − 100` on a different raw field. An early guess of
+`raw × 0.08 psi` fit a Model 3 placard but was wrong once the vehicle turned
+out to be a camper; the gauge reading settled it.
 
 ## Open questions
 
-- **The exact pressure scale.** `raw × 0.08 psi` fits the placard well across
-  four cold tyres, but with no reference-gauge reading the constant is not yet
-  pinned. The raw integer is exposed as `Raw pressure` so it can be corrected.
 - An awake *advertisement* has still never been seen from these units — only
   the 3-byte sleep frame `01 fe 03`, across days of parking and driving. 1.0.3's
   two advertisement blind spots (another address; dropping the `0x022B`
