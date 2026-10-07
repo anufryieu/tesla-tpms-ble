@@ -404,19 +404,22 @@ class TestUnknownAddressWatcher:
 class TestConnectionUpdate:
     """update_from_connection() turns a GATT reading into entities."""
 
+    # A real reply from sensor 10B2: raw pressure 527 (~2.91 bar), temp 19 C.
+    REAL_REPLY = bytes.fromhex("1208e20105088f041026")
+
     def _reading(self):
         from custom_components.tesla_tpms_ble.decoder import decode_tpdata
 
-        return decode_tpdata(bytes.fromhex("08ad021028"))  # 301 kPa, 20 C
+        return decode_tpdata(self.REAL_REPLY)
 
     def test_connection_reading_publishes_pressure_and_temperature(self):
         data = TeslaTPMSBluetoothDeviceData()
         update = data.update_from_connection(self._reading(), service_info(b"\x01\x02"))
         v = values(update)
-        assert v[TPMSSensor.PRESSURE] == pytest.approx(3.01)
-        assert v[TPMSSensor.TEMPERATURE] == pytest.approx(20.0)
-        assert v[TPMSSensor.RAW_PRESSURE] == 301
-        assert v[TPMSSensor.RAW_TEMPERATURE] == 40
+        assert v[TPMSSensor.PRESSURE] == pytest.approx(2.91, abs=0.01)
+        assert v[TPMSSensor.TEMPERATURE] == pytest.approx(19.0)
+        assert v[TPMSSensor.RAW_PRESSURE] == 527
+        assert v[TPMSSensor.RAW_TEMPERATURE] == 38
         assert binary_values(update)[TPMSBinarySensor.AWAKE] is True
         # STATUS is an advertisement-only byte; a connection update must not set it.
         assert TPMSSensor.STATUS not in v
@@ -424,8 +427,8 @@ class TestConnectionUpdate:
     def test_connection_reading_honours_trim(self):
         data = TeslaTPMSBluetoothDeviceData(pressure_trim=0.1, temperature_trim=-2.0)
         v = values(data.update_from_connection(self._reading(), service_info(b"\x01")))
-        assert v[TPMSSensor.PRESSURE] == pytest.approx(3.11)
-        assert v[TPMSSensor.TEMPERATURE] == pytest.approx(18.0)
+        assert v[TPMSSensor.PRESSURE] == pytest.approx(3.01, abs=0.01)
+        assert v[TPMSSensor.TEMPERATURE] == pytest.approx(17.0)
 
 
 class _FakeChar:
@@ -469,13 +472,14 @@ class TestConnectionRequest:
     def test_learns_the_frame_that_gets_a_reply(self):
         from custom_components.tesla_tpms_ble.connection import TeslaTpmsConnection
 
-        # Sensor answers only the "wrapped as field 1" framing.
-        reply = bytes.fromhex("08ad021028")
+        # Sensor answers only the "wrapped as field 1" framing, with a real
+        # nested TPData reply (raw pressure 527 ~ 2.91 bar).
+        reply = bytes.fromhex("1208e20105088f041026")
         client = _FakeClient(answers_to=bytes.fromhex("0a020801"), reply=reply)
         conn = TeslaTpmsConnection()
         reading = asyncio.run(conn._async_request(client))
 
-        assert reading.pressure_bar == pytest.approx(3.01)
+        assert reading.pressure_bar == pytest.approx(2.91, abs=0.01)
         assert conn.learned_request == "0a020801"
         # Once learned, a second poll writes only that one frame.
         client2 = _FakeClient(answers_to=bytes.fromhex("0a020801"), reply=reply)

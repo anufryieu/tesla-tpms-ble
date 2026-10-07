@@ -249,29 +249,46 @@ class TestTPDataRequests:
 class TestDecodeTPData:
     """Decoding a TPData indication received on 0213."""
 
-    def test_bare_pressure_and_temperature(self):
-        # TPData{ pressure=101 (int32), temperature=20 (sint32 -> zigzag 40) }
-        reading = decode_tpdata(bytes.fromhex("08651028"))
+    # Real replies captured from the four fitted Autel sensors (parked, cold).
+    # Nesting: field 2 -> field 28 -> {field 1 = pressure, field 2 = temp}.
+    REAL_REPLIES = {
+        "10F1": ("1208e20105089e041026", 542, 38, 19),
+        "1104": ("1208e20105089a041024", 538, 36, 18),
+        "10B2": ("1208e20105088f041026", 527, 38, 19),
+        "142E": ("1208e20105088b041024", 523, 36, 18),
+    }
+
+    @pytest.mark.parametrize("name", list(REAL_REPLIES))
+    def test_real_captured_replies_decode(self, name):
+        hex_reply, raw_p, raw_t, temp_c = self.REAL_REPLIES[name]
+        reading = decode_tpdata(bytes.fromhex(hex_reply))
         assert reading is not None
         assert reading.awake is True
-        assert reading.pressure_bar == 1.01  # 101 kPa read as whole kPa
-        assert reading.temperature_c == 20.0
-        assert reading.raw == {"gatt_pressure": 101, "gatt_temperature": 40}
         assert reading.profile == "connection"
+        assert reading.raw["gatt_pressure"] == raw_p
+        assert reading.raw["gatt_temperature"] == raw_t
+        assert reading.temperature_c == temp_c
+        # ~42 psi placard: raw * 0.08 psi -> bar.
+        assert reading.pressure_bar == pytest.approx(raw_p * 0.08 / 14.50377, abs=0.01)
+
+    def test_pressure_lands_near_the_42_psi_placard(self):
+        # Sanity: a real capture should read ~2.9 bar, not absurdly off.
+        reading = decode_tpdata(bytes.fromhex("1208e20105088f041026"))
+        assert 2.5 < reading.pressure_bar < 3.3
 
     def test_negative_temperature_is_zigzag_decoded(self):
-        # temperature = -5 -> zigzag 9
-        reading = decode_tpdata(bytes.fromhex("08651009"))
+        # bare {pressure=527, temperature=-5 -> zigzag 9}
+        reading = decode_tpdata(bytes.fromhex("088f041009"))
         assert reading.temperature_c == -5.0
 
-    def test_message_may_be_wrapped_in_one_outer_field(self):
-        reading = decode_tpdata(bytes.fromhex("0a0408651028"))
-        assert reading.pressure_bar == 1.01
-        assert reading.temperature_c == 20.0
+    def test_bare_message_without_wrappers_decodes(self):
+        reading = decode_tpdata(bytes.fromhex("088f041026"))
+        assert reading.raw["gatt_pressure"] == 527
+        assert reading.temperature_c == 19.0
 
     def test_pressure_only(self):
-        reading = decode_tpdata(bytes.fromhex("08ad02"))  # 301 kPa, no temp field
-        assert reading.pressure_bar == 3.01
+        reading = decode_tpdata(bytes.fromhex("088f04"))  # no temperature field
+        assert reading.raw["gatt_pressure"] == 527
         assert reading.temperature_c is None
 
     def test_rejects_rubbish(self):
@@ -279,5 +296,5 @@ class TestDecodeTPData:
         assert decode_tpdata(b"\xff\xff\xff") is None
 
     def test_rejects_an_implausible_pressure(self):
-        # field 1 varint = 200000 kPa, far outside any real reading
+        # field 1 varint = 200000, far outside any real reading
         assert decode_tpdata(bytes.fromhex("08c09a0c")) is None
