@@ -220,28 +220,49 @@ connection** switch turns the passive coordinator into an active one that, when
 a connectable path exists, periodically connects and writes a `TPDataRequest`,
 parses the `TPData` indication, and feeds pressure and temperature into the same
 entities. It tries the same candidate framings and remembers the one that
-works. `TPData.pressure` is decoded as whole kPa, not through a `DecodeProfile`,
-because it is a different encoding from the advertisement. The decode lives in
-`decode_tpdata()` in `decoder.py`; the connection handling in `connection.py`.
+works. The decode lives in `decode_tpdata()` in `decoder.py`; the connection
+handling in `connection.py`.
+
+### The connection reply, measured
+
+Since 1.0.5 the integration keeps the raw reply bytes, and all four fitted
+sensors answered. A reply is a `TPData` message wrapped in two outer messages:
+
+```
+ 12 08                     field 2, length 8  ─┐ outer wrappers
+   e2 01 05                field 28, length 5  ─┘
+     08 9e 04              field 1 (varint)  = 542   pressure
+     10 26                 field 2 (varint)  = 38     temperature (sint32)
+```
+
+`decode_tpdata()` therefore searches inward for the innermost message carrying
+a varint field 1 rather than assuming a flat layout. The four units (parked,
+cold) reported:
+
+| sensor | raw pressure | raw temp | pressure | temp |
+|--------|-------------:|---------:|---------:|-----:|
+| 10F1   | 542 | 38 | 43.4 psi | 19 °C |
+| 1104   | 538 | 36 | 43.0 psi | 18 °C |
+| 10B2   | 527 | 38 | 42.2 psi | 19 °C |
+| 142E   | 523 | 36 | 41.8 psi | 18 °C |
+
+Temperature is a plain `sint32` in whole °C (zigzag-decoded: `38 → 19`). For
+pressure, `raw × 0.08 psi` lands all four on a Model 3 / Y's 42 psi (2.9 bar)
+placard, so that is the working scale — provisional until confirmed against a
+gauge, which is why the raw value is always exposed. This differs from both the
+advertisement (`raw − 100` kPa) and the single public `TPData.pressure = 101`
+sample, so the paths genuinely do not share units.
 
 ## Open questions
 
-- What an awake frame from these Autel sensors looks like on air. Every capture
-  so far — Home Assistant diagnostics, and nRF Connect point-blank on all four
-  units while parked — has shown only the 3-byte sleep frame `01 fe 03`. No
-  8-byte awake advertisement has yet been observed from *these* units; the awake
-  layout above still rests on the upstream sketch's sensors alone. It is not yet
-  settled whether these units broadcast pressure when awake (a range/timing
-  problem in the vehicle) or only ever hand it out over a GATT connection.
-  Payload histories from a Raspberry Pi adapter across several days of parking
-  and driving (integrations 1.0.2 and 1.0.3) point at the second: all four
-  sensors reappear together after each drive and the first frame heard is always
-  the sleep frame `01 fe 03`, with no longer payload and no other address of
-  their own. 1.0.3 closed the two advertisement blind spots — an awake sensor
-  advertising from another address (`other_addresses` in the diagnostics) and
-  one dropping the `0x022B` manufacturer data while awake — and neither has
-  fired. The remaining way pressure could be reachable is the GATT connection a
-  car uses; `tools/tpms_gatt.py --request` tests that directly.
+- **The exact pressure scale.** `raw × 0.08 psi` fits the placard well across
+  four cold tyres, but with no reference-gauge reading the constant is not yet
+  pinned. The raw integer is exposed as `Raw pressure` so it can be corrected.
+- An awake *advertisement* has still never been seen from these units — only
+  the 3-byte sleep frame `01 fe 03`, across days of parking and driving. 1.0.3's
+  two advertisement blind spots (another address; dropping the `0x022B`
+  manufacturer data while awake) never fired. Pressure reaches Home Assistant
+  only over the GATT connection, which is now wired up.
 - Bytes 0 and 1 are not understood. In sleep frames they were `01 FE` on all
   four sensors, so they are not a sensor ID. They are exposed as raw
   diagnostics; if you see them vary in an interesting way, that is worth writing

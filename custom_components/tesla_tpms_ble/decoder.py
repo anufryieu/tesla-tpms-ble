@@ -315,10 +315,12 @@ def decode_full_advertisement(
 #     enum TPDataRequest_E { ... TP_DATAREQUEST_PRESSURE_TEMPERATURE = 1; ... }
 #     message TPData       { int32 pressure = 1; sint32 temperature = 2; }
 #
-# ``TPData.pressure`` is a different encoding from the advertisement: the one
-# captured value was a plain kPa-ish integer (101), not the advertisement's
-# ``raw - 100``. The two paths do not share units, so this is decoded as whole
-# kPa rather than through a :class:`DecodeProfile`.
+# Real replies from fitted sensors are ``TPData`` wrapped in two outer
+# messages (``field 2 -> field 28 -> {pressure, temperature}``); the decoder
+# searches in for the innermost message rather than assuming a flat layout.
+# ``TPData.pressure`` is a different encoding from the advertisement -- raw
+# units of about 0.08 psi, not the advertisement's ``raw - 100`` kPa -- so it
+# is decoded with its own scale rather than through a :class:`DecodeProfile`.
 #
 # The exact VCSEC framing around the request is not public, so several
 # documented candidate encodings are offered; a caller tries them in turn.
@@ -405,40 +407,63 @@ def _unzigzag(value: int) -> int:
     return (value >> 1) ^ -(value & 1)
 
 
+def _find_tpdata_fields(data: bytes, depth: int = 0) -> tuple[int, int | None] | None:
+    """Find the innermost ``{pressure, temperature}`` message, recursing in.
+
+    A real reply from a fitted sensor is ``TPData`` wrapped in two outer
+    messages: ``field 2 -> field 28 -> {field 1 = pressure, field 2 = temp}``.
+    Rather than hard-code that nesting, search for the first message carrying a
+    varint field 1 (pressure), descending through length-delimited fields.
+    Returns ``(pressure_raw, temperature_raw_or_None)`` or ``None``.
+    """
+    if depth > 5:  # a sane bound; real nesting is two deep
+        return None
+    varints, submessages = _collect_protobuf(data)
+    if 1 in varints:
+        return varints[1], varints.get(2)
+    for sub in submessages:
+        found = _find_tpdata_fields(sub, depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
+# TPData pressure scale. Four fitted sensors parked and cold reported raw
+# pressures of 523-542 with the nesting above; raw * 0.08 psi lands them at
+# 41.8-43.4 psi, i.e. right on a Model 3 / Y's 42 psi (2.9 bar) placard, and
+# the paired temperatures decoded to a plausible 18-19 C. 0.08 psi == this
+# many kPa per unit. Provisional until confirmed against a gauge; the raw
+# value is always exposed so the scale can be corrected without guessing.
+_GATT_KPA_PER_UNIT: Final[float] = 0.08 * _KPA_PER_PSI
+
+
 def decode_tpdata(payload: bytes | bytearray) -> TeslaTpmsReading | None:
     """Decode a ``TPData`` indication received over the GATT connection.
 
-    ``payload`` is the raw bytes of one indication on characteristic 0213. The
-    message may be a bare ``TPData`` or wrapped in one outer message; both are
-    handled. Returns ``None`` if no plausible pressure field is found.
+    ``payload`` is the raw bytes of one indication on characteristic 0213,
+    possibly wrapped in one or more outer messages. ``TPData`` carries pressure
+    as ``int32`` field 1 and temperature as ``sint32`` (zigzag) field 2 in
+    whole degrees C -- a different encoding from the advertisement. Returns
+    ``None`` if no plausible pressure field is found.
     """
-    data = bytes(payload)
-    varints, submessages = _collect_protobuf(data)
-    if 1 not in varints:
-        # Wrapped: descend into the first sub-message that has a varint field 1.
-        for sub in submessages:
-            inner_varints, _ = _collect_protobuf(sub)
-            if 1 in inner_varints:
-                varints = inner_varints
-                break
-    if 1 not in varints:
+    found = _find_tpdata_fields(bytes(payload))
+    if found is None:
         return None
-
-    pressure_kpa = varints[1]
+    pressure_raw, temperature_raw = found
     # Guard against a mis-parse turning random bytes into a "reading".
-    if not 0 <= pressure_kpa <= 100_000:
+    if not 0 <= pressure_raw <= 100_000:
         return None
 
-    raw: dict[str, int] = {"gatt_pressure": pressure_kpa}
+    raw: dict[str, int] = {"gatt_pressure": pressure_raw}
     temperature_c: float | None = None
-    if 2 in varints:
-        temperature_c = float(_unzigzag(varints[2]))
-        raw["gatt_temperature"] = varints[2]
+    if temperature_raw is not None:
+        temperature_c = float(_unzigzag(temperature_raw))
+        raw["gatt_temperature"] = temperature_raw
 
     return TeslaTpmsReading(
         awake=True,
         status=STATUS_AWAKE_MIN,
-        pressure_bar=round(pressure_kpa / 100.0, 3),
+        pressure_bar=round(pressure_raw * _GATT_KPA_PER_UNIT / 100.0, 3),
         temperature_c=temperature_c,
         raw=raw,
         profile="connection",
