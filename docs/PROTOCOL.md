@@ -17,20 +17,22 @@ discovered.
 
 ## Transport
 
-BLE advertisements. Everything this integration reads is in the advertisement
-itself, so nothing ever connects to the sensor, and a passive scanner or
-Bluetooth proxy is enough. That is good news for Home Assistant: listening costs
-the sensor nothing.
+Two paths, and which one works depends on the sensor.
 
-This is not the only way the sensor can be read, and it is worth knowing what
-the car does differently. These sensors are **connectable** (a TI CC26xx radio
-alongside a Melexis pressure die), and a Tesla does not read pressure from the
-advertisement at all: it connects and exchanges Protobuf messages over GATT.
-The measurement path this integration relies on — pressure in the advertisement
-— only carries data while the sensor is **awake**. See
-[the connection path](#the-connection-path-what-a-tesla-does) below; it matters
-because a sensor that only ever emits sleep frames will never feed a passive
-listener, however close the adapter is.
+**Advertisements** are the default, and everything on this path is in the
+advertisement itself: nothing connects to the sensor, a passive scanner or
+Bluetooth proxy is enough, and listening costs the sensor nothing. But an
+advertisement only carries a measurement while the sensor is **awake**, so a
+sensor that only ever emits sleep frames will never feed a passive listener,
+however close the adapter is.
+
+**A GATT connection** is what a Tesla actually does. These sensors are
+connectable (a TI CC26xx radio alongside a Melexis pressure die) and the car
+does not read pressure from the advertisement at all — it connects and exchanges
+Protobuf messages. Since 1.0.4 this integration can do the same, as an opt-in;
+see [the connection path](#the-connection-path-what-a-tesla-does) below. It needs
+a *connectable* adapter or proxy, and on the units tested here it is the only
+path that has ever produced a reading.
 
 ## Advertisement structure
 
@@ -199,23 +201,24 @@ encryption on this exchange — enrolment is by MAC allowlist plus a drive-based
 "auto-learn" — but nothing replies until a request is written, and the sensor
 drops an idle connection after about 15 seconds.
 
-Note `TPData.pressure` is a plain kPa-ish integer here (`101` in a captured
-example), a *different* encoding from the advertisement's `raw − 100` kPa. The
-two paths do not share units.
+`TPData.pressure` is **not** the advertisement's raw pressure field. It is a
+separate integer arriving on a separate path, and it needed its own calibration;
+the one public sample is `101`, from a bench sensor at rest. What it turned out
+to be is [measured below](#the-connection-reply-measured).
 
 **Why this matters for Home Assistant.** HA's Bluetooth stack is built around
-advertisements; it does not run this request/response protocol, and this
-integration does not either. So the advertisement path is the only one available
-without a bespoke GATT client — and it yields pressure *only from awake frames*.
-`tools/tpms_gatt.py` connects and listens on `0213` to test whether a sensor
-will surrender a reading over a connection at all. By default it only listens;
-with `--request` it also writes a `TPDataRequest` to `0212` — the plain
-pressure/temperature read a car performs, not enrolment or the certificate
-exchange — trying the documented candidate framings and reporting which, if any,
-draws a `TPData` reply. If one does, that frame is what a connection-based
-reader in the integration would send.
+advertisements and does not run this request/response protocol itself, so the
+advertisement path is the only one that comes for free — and it yields pressure
+*only from awake frames*. Anything more needs a bespoke GATT client.
 
-Since 1.0.4 the integration can do this itself: the optional **Read over a
+`tools/tpms_gatt.py` is that client, standalone: it connects and listens on
+`0213` to test whether a sensor will surrender a reading over a connection at
+all. By default it only listens; with `--request` it also writes a
+`TPDataRequest` to `0212` — the plain pressure/temperature read a car performs,
+not enrolment or the certificate exchange — trying the documented candidate
+framings and reporting which, if any, draws a `TPData` reply.
+
+Since 1.0.4 the integration carries the same client: the optional **Read over a
 connection** switch turns the passive coordinator into an active one that, when
 a connectable path exists, periodically connects and writes a `TPDataRequest`,
 parses the `TPData` indication, and feeds pressure and temperature into the same
@@ -236,34 +239,32 @@ sensors answered. A reply is a `TPData` message wrapped in two outer messages:
 ```
 
 `decode_tpdata()` therefore searches inward for the innermost message carrying
-a varint field 1 rather than assuming a flat layout. The four units (parked,
-cold) reported:
-
-| sensor | raw pressure | raw temp | pressure | temp |
-|--------|-------------:|---------:|---------:|-----:|
-| 10F1   | 542 | 38 | 43.4 psi | 19 °C |
-| 1104   | 538 | 36 | 43.0 psi | 18 °C |
-| 10B2   | 527 | 38 | 42.2 psi | 19 °C |
-| 142E   | 523 | 36 | 41.8 psi | 18 °C |
+a varint field 1 rather than assuming a flat layout.
 
 Temperature is a plain `sint32` in whole °C (zigzag-decoded: `38 → 19`).
 Pressure is **absolute pressure in whole kPa**, confirmed against a gauge: the
 sensors were on a camper, and the owner's readings were front 62 psi, rear
-63.5 / 64.5 psi. Subtracting one atmosphere (101.325 kPa) matches all four:
+63.5 / 64.5 psi. Subtracting one atmosphere (101.325 kPa) matches all four units
+(parked, cold):
 
-| sensor | raw kPa | gauge (computed) | gauge (measured) |
-|--------|--------:|-----------------:|-----------------:|
-| 10F1 (RR) | 542 | 63.9 psi | 64.5 psi |
-| 1104 (RL) | 538 | 63.3 psi | 63.5 psi |
-| 10B2 (F)  | 527 | 61.7 psi | 62 psi |
-| 142E (F)  | 523 | 61.1 psi | 62 psi |
+| sensor | raw kPa | raw temp | gauge (decoded) | gauge (measured) | temp |
+|--------|--------:|---------:|----------------:|-----------------:|-----:|
+| 10F1 (RR) | 542 | 38 | 63.9 psi | 64.5 psi | 19 °C |
+| 1104 (RL) | 538 | 36 | 63.3 psi | 63.5 psi | 18 °C |
+| 10B2 (F)  | 527 | 38 | 61.7 psi | 62 psi   | 19 °C |
+| 142E (F)  | 523 | 36 | 61.1 psi | 62 psi   | 18 °C |
 
-All within the sensor's ±0.1 bar (±1.5 psi) spec. This also matches the single
+All within the sensor's ±0.1 bar (±1.5 psi) spec. It also matches the single
 public `TPData.pressure = 101` sample — a bench sensor at one atmosphere, i.e.
-zero gauge. So `gauge_kPa = raw − 101.325`, a different encoding from the
-advertisement's `raw − 100` on a different raw field. An early guess of
-`raw × 0.08 psi` fit a Model 3 placard but was wrong once the vehicle turned
-out to be a camper; the gauge reading settled it.
+zero gauge. So `gauge_kPa = raw − 101.325`.
+
+Both paths therefore report absolute kPa, but on different fields and with
+different evidence behind them: the connection path subtracts a full atmosphere
+because a gauge said so, while the advertisement keeps the upstream fit's round
+`− 100` because no awake advertisement has ever been measured. The 1.3 kPa
+between the two constants is a tenth of the sensor's own resolution. An early
+guess of `raw × 0.08 psi` fit a Model 3 placard but was wrong once the vehicle
+turned out to be a camper; the gauge reading settled it.
 
 ## Open questions
 

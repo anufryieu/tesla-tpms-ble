@@ -17,7 +17,8 @@ The cleanest check needs a decent tyre gauge and five minutes.
    the `Raw pressure` entity → cog icon → **Enabled**. Do the same for
    `Raw temperature`. They are diagnostic entities, disabled by default so they
    do not clutter a normal install.
-2. Get the sensor awake and transmitting (see the README's *Waking the sensors*).
+2. Get the sensor awake and transmitting (see *Before you install: wake the
+   sensors* in the README).
 3. Note `Raw pressure` and, at the same moment, the pressure your gauge reads.
 4. Repeat at two or three different pressures — for example 2.0, 2.5 and 2.9 bar.
    Let the air settle for a few seconds after each change.
@@ -73,6 +74,11 @@ Configure**, per sensor:
 - **Pressure correction (bar)** and **Temperature correction (°C)** — additive
   trims applied after decoding. Changes the offset. Use these for a sensor that
   reads consistently high or low.
+
+The profile applies to the **advertisement** path only: readings fetched with
+**Read over a connection** arrive in a different encoding, already pinned
+against a gauge, and ignore the profile setting. Both trims apply to both paths,
+so a sensor read over a connection is corrected with the trim fields alone.
 
 Changes take effect on the next advertisement; there is no need to reload the
 integration or restart Home Assistant.

@@ -1,0 +1,16 @@
+# Tooling config only -- this repository is a Home Assistant custom component
+# copied into <config>/custom_components/, not a package anyone pip-installs.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "BLE", "SIM", "UP", "RUF"]
+# datetime.UTC is 3.11+. The component only ever runs on Home Assistant's own
+# Python, but the tools in tools/ are run by hand on whatever the user has, so
+# timezone.utc stays.
+ignore = ["UP017"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
