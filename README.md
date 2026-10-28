@@ -238,8 +238,8 @@ was done.
 
 The decoder in `custom_components/tesla_tpms_ble/decoder.py` has no Home
 Assistant or bleak imports, so `pip install pytest` alone is enough for the
-decoder suite — the integration tests skip themselves when Home Assistant is
-not installed. CI runs the same suite, `ruff check .` and Home Assistant's
+decoder suite — the integration tests skip themselves when the Home Assistant
+Bluetooth stack is not installed. CI runs the same suite, `ruff check .` and Home Assistant's
 own `hassfest` manifest validation on every push.
 
 ## Credits

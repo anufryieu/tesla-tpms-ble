@@ -2,9 +2,19 @@
 # or bleak imports on purpose. The integration tests exercise the real parser
 # pipeline, so they need Home Assistant and the two state-data libraries the
 # parser binds to (the same ones manifest.json declares). They skip themselves
-# if Home Assistant is missing, so `pip install pytest` alone still gets you the
-# decoder suite.
+# if the Home Assistant Bluetooth stack is missing, so `pip install pytest`
+# alone still gets you the decoder suite.
 homeassistant>=2024.12
 bluetooth-sensor-state-data>=1.7.1
 sensor-state-data>=2.18.1
 pytest>=8.0
+
+# The homeassistant wheel ships core requirements only: every integration
+# declares its own, and Home Assistant the application installs them at
+# runtime. homeassistant.components.bluetooth lists usb as a dependency and
+# imports it at module scope, so importing it needs the usb integration's
+# requirements present -- otherwise collection dies on `No module named
+# 'aiousbwatcher'`. The rest of the Bluetooth stack (bleak, habluetooth,
+# bluetooth-adapters) arrives transitively with bluetooth-sensor-state-data.
+aiousbwatcher>=1.1.1
+pyserial>=3.5
