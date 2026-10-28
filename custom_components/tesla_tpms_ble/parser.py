@@ -76,8 +76,8 @@ class PayloadHistory:
     Keeping one entry per distinct payload, with counts and timestamps,
     survives that transition -- a single awake frame during a drive is still
     listed hours later. ``max_payload_len`` is the field that answers the
-    question this was written for: anything above
-    :data:`~.decoder.MIN_PAYLOAD_LEN` means a real reading reached us.
+    question this was written for: anything at
+    :data:`~.decoder.MIN_PAYLOAD_LEN` or above means a real reading reached us.
 
     Home Assistant does not forward every radio frame. It drops an
     advertisement identical to the previous one from the same device, so a
@@ -167,7 +167,7 @@ class PayloadHistory:
 
     @property
     def max_payload_len(self) -> int:
-        """Longest payload seen. Above ``MIN_PAYLOAD_LEN`` means a reading."""
+        """Longest payload seen. ``MIN_PAYLOAD_LEN`` or more means a reading."""
         return max(
             (len(p) for p in self._entries if isinstance(p, bytes)), default=0
         )

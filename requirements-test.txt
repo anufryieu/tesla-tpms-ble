@@ -1,0 +1,10 @@
+# The decoder tests need nothing but pytest -- decoder.py has no Home Assistant
+# or bleak imports on purpose. The integration tests exercise the real parser
+# pipeline, so they need Home Assistant and the two state-data libraries the
+# parser binds to (the same ones manifest.json declares). They skip themselves
+# if Home Assistant is missing, so `pip install pytest` alone still gets you the
+# decoder suite.
+homeassistant>=2024.12
+bluetooth-sensor-state-data>=1.7.1
+sensor-state-data>=2.18.1
+pytest>=8.0

@@ -13,6 +13,7 @@ lives in :mod:`decoder` so it stays testable without Bluetooth.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Final
 
@@ -148,10 +149,9 @@ class TeslaTpmsConnection:
                     )
                     break
         finally:
-            try:
+            # Already disconnecting, or never subscribed: nothing to salvage.
+            with contextlib.suppress(BleakError):
                 await client.stop_notify(CHAR_INDICATE)
-            except BleakError:
-                pass
 
         # Record what came back regardless of how it decodes, for diagnostics.
         self.last_replies = [b.hex() for b in got]
