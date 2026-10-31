@@ -37,7 +37,11 @@ SENSOR_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
         device_class=SensorDeviceClass.PRESSURE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPressure.BAR,
-        suggested_display_precision=2,
+        # One decimal, not two. The wire quantum is 1 kPa (0.01 bar) but Autel
+        # specs +-0.1 bar for this part, so a second decimal is noise dressed
+        # up as precision -- two wheels at the same pressure read 0.02 apart.
+        # The unrounded value is still what gets stored and compared against.
+        suggested_display_precision=1,
     ),
     TPMSSensor.TEMPERATURE: SensorEntityDescription(
         key=TPMSSensor.TEMPERATURE,
