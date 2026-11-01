@@ -1,12 +1,9 @@
 """Sensor platform for Tesla / Autel BLE TPMS."""
 from __future__ import annotations
 
-from homeassistant import config_entries
 from homeassistant.components.bluetooth.passive_update_processor import (
     PassiveBluetoothDataProcessor,
     PassiveBluetoothDataUpdate,
-    PassiveBluetoothProcessorCoordinator,
-    PassiveBluetoothProcessorEntity,
 )
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -17,20 +14,28 @@ from homeassistant.components.sensor import (
 from homeassistant.const import (
     PERCENTAGE,
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
+    EntityCategory,
     UnitOfElectricPotential,
     UnitOfPressure,
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.sensor import sensor_device_info_to_hass_device_info
 from sensor_state_data import SensorUpdate
 
-from .const import DOMAIN
+from .coordinator import TeslaTpmsConfigEntry
 from .device import device_key_to_bluetooth_entity_key
+from .entity import TeslaTPMSEntity
 from .parser import TPMSSensor
 
+# Everything arrives by advertisement or over one held connection, so there is
+# nothing for Home Assistant to rate-limit.
+PARALLEL_UPDATES = 0
+
+# Entities with a device class are named from it -- "Pressure", "Battery" --
+# and that name is already translated, so they need no translation_key of
+# their own. The rest do, and theirs live in strings.json.
 SENSOR_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
     TPMSSensor.PRESSURE: SensorEntityDescription(
         key=TPMSSensor.PRESSURE,
@@ -77,23 +82,23 @@ SENSOR_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
     # decode can be checked against a reference gauge. See docs/CALIBRATION.md.
     TPMSSensor.RAW_PRESSURE: SensorEntityDescription(
         key=TPMSSensor.RAW_PRESSURE,
+        translation_key=TPMSSensor.RAW_PRESSURE,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        icon="mdi:numeric",
         entity_registry_enabled_default=False,
     ),
     TPMSSensor.RAW_TEMPERATURE: SensorEntityDescription(
         key=TPMSSensor.RAW_TEMPERATURE,
+        translation_key=TPMSSensor.RAW_TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        icon="mdi:numeric",
         entity_registry_enabled_default=False,
     ),
     TPMSSensor.STATUS: SensorEntityDescription(
         key=TPMSSensor.STATUS,
+        translation_key=TPMSSensor.STATUS,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        icon="mdi:information-outline",
         entity_registry_enabled_default=False,
     ),
 }
@@ -119,22 +124,23 @@ def sensor_update_to_bluetooth_data_update(
             device_key_to_bluetooth_entity_key(device_key): sensor_values.native_value
             for device_key, sensor_values in sensor_update.entity_values.items()
         },
+        # Deliberately nameless: a name here would win over the description,
+        # and the parser's are hardcoded English. None lets the device class or
+        # the translation key name the entity instead.
         entity_names={
-            device_key_to_bluetooth_entity_key(device_key): sensor_values.name
-            for device_key, sensor_values in sensor_update.entity_values.items()
+            device_key_to_bluetooth_entity_key(device_key): None
+            for device_key in sensor_update.entity_values
         },
     )
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: config_entries.ConfigEntry,
+    entry: TeslaTpmsConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the TPMS sensors."""
-    coordinator: PassiveBluetoothProcessorCoordinator = hass.data[DOMAIN][
-        entry.entry_id
-    ]
+    coordinator = entry.runtime_data.coordinator
     processor = PassiveBluetoothDataProcessor(sensor_update_to_bluetooth_data_update)
     entry.async_on_unload(
         processor.async_add_entities_listener(
@@ -146,25 +152,10 @@ async def async_setup_entry(
     )
 
 
-class TeslaTPMSSensorEntity(PassiveBluetoothProcessorEntity, SensorEntity):
+class TeslaTPMSSensorEntity(TeslaTPMSEntity, SensorEntity):
     """A single value from a Tesla-protocol TPMS sensor."""
 
     @property
     def native_value(self) -> str | int | float | None:
         """Return the native value."""
         return self.processor.entity_data.get(self.entity_key)
-
-    @property
-    def available(self) -> bool:
-        """Return True once the sensor has ever been seen.
-
-        TPMS sensors sleep when the wheel is not turning, so going quiet is
-        normal and must not mark the entity unavailable -- that would lose the
-        last known pressure every time the car is parked.
-        """
-        return True
-
-    @property
-    def assumed_state(self) -> bool:
-        """Return True when the sensor is no longer broadcasting."""
-        return not self.processor.available

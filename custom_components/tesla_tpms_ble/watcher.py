@@ -35,7 +35,6 @@ class UnknownAddressWatcher:
         """Start with nothing seen and no addresses configured."""
         self.configured: set[str] = set()
         self.histories: dict[str, PayloadHistory] = {}
-        self.names: dict[str, str] = {}
         self.addresses_dropped = 0
         self._unsub: CALLBACK_TYPE | None = None
 
@@ -81,8 +80,6 @@ class UnknownAddressWatcher:
                 self.addresses_dropped += 1
                 return
             history = self.histories[address] = PayloadHistory()
-        if service_info.name and service_info.name != address:
-            self.names[address] = service_info.name
 
         if payload is None:
             key: bytes | str = describe_advertisement(service_info)
@@ -104,18 +101,46 @@ class UnknownAddressWatcher:
         )
 
     def as_dict(self) -> dict[str, Any]:
-        """Render for a diagnostics download, leaving out configured sensors."""
+        """Render for a diagnostics download, leaving out configured sensors.
+
+        These addresses belong to vehicles and sensors that are not the user's,
+        and a diagnostics download is written to be pasted into a bug report,
+        so each one is cut back to its manufacturer prefix and its advertised
+        name is left out. Both identify a specific vehicle; neither is needed
+        to answer what this history is for, which is whether a reading ever
+        arrives from an address no sensor is set up for.
+        """
         return {
             "note": (
                 "Advertisements with the Tesla company ID, or from the "
                 f"{SENSOR_ADDRESS_PREFIX} address block, from addresses that "
                 "are not set up as a sensor. An awake frame here means a "
-                "sensor sends its reading from another address."
+                "sensor sends its reading from another address. Addresses are "
+                "masked past the manufacturer prefix, and advertised names "
+                "left out, because they are not this user's devices."
             ),
             "addresses_dropped": self.addresses_dropped,
             "addresses": {
-                address: {"name": self.names.get(address), **history.as_dict()}
-                for address, history in self.histories.items()
-                if address not in self.configured
+                _mask_address(address, index): history.as_dict()
+                for index, (address, history) in enumerate(
+                    (
+                        (address, history)
+                        for address, history in self.histories.items()
+                        if address not in self.configured
+                    ),
+                    start=1,
+                )
             },
         }
+
+
+def _mask_address(address: str, index: int) -> str:
+    """Keep the manufacturer prefix of an address, drop the rest.
+
+    The prefix is the part that carries diagnostic weight -- it is how a
+    sensor is told apart from a car -- and the index keeps two masked
+    addresses from collapsing into one key.
+    """
+    octets = address.split(":")
+    kept = ":".join(octets[:3]) if len(octets) >= 3 else address
+    return f"{kept}:xx:xx:xx #{index}"

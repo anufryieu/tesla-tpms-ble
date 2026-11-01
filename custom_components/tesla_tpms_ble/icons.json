@@ -1,0 +1,15 @@
+{
+  "entity": {
+    "sensor": {
+      "raw_pressure": {
+        "default": "mdi:numeric"
+      },
+      "raw_temperature": {
+        "default": "mdi:numeric"
+      },
+      "status": {
+        "default": "mdi:information-outline"
+      }
+    }
+  }
+}

@@ -272,3 +272,32 @@ extra clicks.
 
 Then carry on from *Step 3 — wake a sensor* above. HACS will notify you when a
 new release is published, which manual copying will not.
+
+---
+
+## Removing the integration
+
+Nothing is written outside Home Assistant's own config, so removal is just the
+reverse of installing.
+
+1. **Settings → Devices & Services → Tesla / Autel BLE TPMS**
+2. For each sensor, **⋮ → Delete**. That removes the config entry, its device
+   and its entities, along with the decoding profile and trim offsets you set
+   for it. Recorded history stays in the recorder database until it is purged.
+3. Remove the integration itself:
+   - **HACS:** HACS → Tesla / Autel BLE TPMS → ⋮ → **Remove**
+   - **Manual:** delete `config/custom_components/tesla_tpms_ble/`
+4. Restart Home Assistant.
+
+Delete the config entries *before* removing the files — an entry whose code has
+gone shows up as a failed integration and cannot be deleted from the UI until
+the folder is back.
+
+If you added the `logger:` block above, or an ESPHome Bluetooth proxy, those are
+separate and stay until you remove them yourself. The proxy is useful on its own
+and worth keeping.
+
+Removing the integration does nothing to the sensors. They are not paired or
+enrolled to Home Assistant — this only ever listens, and the optional
+connection asks for a reading without changing anything on the sensor — so they
+carry on reporting to the car exactly as before.

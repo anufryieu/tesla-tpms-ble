@@ -366,8 +366,10 @@ class TestUnknownAddressWatcher:
         other = "5A:11:22:33:44:55"
         w._async_advertisement(service_info(payload(), address=other), None)
 
-        seen = w.as_dict()["addresses"][other]
-        assert seen["name"] == "tsTPMS"
+        # Masked past the manufacturer prefix: a diagnostics download goes
+        # into bug reports, and this is somebody else's vehicle.
+        seen = w.as_dict()["addresses"]["5A:11:22:xx:xx:xx #1"]
+        assert other not in w.as_dict()["addresses"]
         assert seen["saw_a_full_length_frame"] is True
         assert seen["payloads"][0]["note"] == "awake"
 
@@ -375,9 +377,9 @@ class TestUnknownAddressWatcher:
         w = self.watcher()
         other = "BC:6A:29:00:00:01"
         w._async_advertisement(service_info(None, address=other), None)
-        assert w.as_dict()["addresses"][other]["payloads"][0]["note"] == (
-            "no Tesla manufacturer data"
-        )
+        assert w.as_dict()["addresses"]["BC:6A:29:xx:xx:xx #1"]["payloads"][0][
+            "note"
+        ] == ("no Tesla manufacturer data")
 
     def test_unrelated_devices_are_ignored(self):
         w = self.watcher()
@@ -543,7 +545,9 @@ class TestTimedPoll:
     """
 
     def _coordinator(self):
-        from custom_components.tesla_tpms_ble import TeslaTpmsCoordinator
+        from custom_components.tesla_tpms_ble.coordinator import (
+            TeslaTpmsCoordinator,
+        )
 
         # Bypass __init__: it wants a live hass, and the two hooks under test
         # read nothing but the attributes set here.
@@ -621,3 +625,94 @@ class TestHeldConnection:
         conn._on_disconnect(conn._client)
         assert conn.connected is False
         assert conn._listening is False
+
+
+class TestEntityNamingAndIcons:
+    """Names and icons come from the translation files, not from Python.
+
+    The parser's ``name=`` arguments used to reach the entities through
+    ``entity_names``, which wins over the entity description. They are
+    deliberately dropped now, so an entity is named either by its device class
+    or by a translation key -- and a key with no string behind it would leave
+    the entity showing the bare device name. Regression cover for that.
+    """
+
+    COMPONENT = (
+        Path(__file__).resolve().parents[1] / "custom_components" / "tesla_tpms_ble"
+    )
+
+    def _json(self, name):
+        return json.loads((self.COMPONENT / name).read_text())
+
+    def _descriptions(self):
+        from custom_components.tesla_tpms_ble.binary_sensor import (
+            BINARY_SENSOR_DESCRIPTIONS,
+        )
+        from custom_components.tesla_tpms_ble.sensor import SENSOR_DESCRIPTIONS
+
+        return {
+            "sensor": SENSOR_DESCRIPTIONS,
+            "binary_sensor": BINARY_SENSOR_DESCRIPTIONS,
+        }
+
+    def test_every_entity_is_named_by_a_device_class_or_a_translation_key(self):
+        for platform, descriptions in self._descriptions().items():
+            for key, description in descriptions.items():
+                assert description.device_class or description.translation_key, (
+                    f"{platform}.{key} would show up with no name of its own"
+                )
+
+    def test_every_translation_key_has_a_name_in_strings(self):
+        strings = self._json("strings.json")["entity"]
+        for platform, descriptions in self._descriptions().items():
+            for key, description in descriptions.items():
+                if not description.translation_key:
+                    continue
+                entry = strings.get(platform, {}).get(description.translation_key)
+                assert entry and entry.get("name"), (
+                    f"{platform}.{key} has translation_key "
+                    f"{description.translation_key!r} with no name behind it"
+                )
+
+    def test_no_redundant_translation_keys(self):
+        # A device class already supplies a translated name, so a key on top of
+        # one is redundant -- core's pylint plugin flags exactly this. The
+        # Awake binary sensor is the deliberate exception: "Running" is the
+        # device class name, and it says less here.
+        for platform, descriptions in self._descriptions().items():
+            for key, description in descriptions.items():
+                if platform == "binary_sensor" and key == "awake":
+                    continue
+                assert not (description.device_class and description.translation_key), (
+                    f"{platform}.{key} has both a device class and a key"
+                )
+
+    def test_icons_are_declared_in_icons_json_not_in_python(self):
+        icons = self._json("icons.json")["entity"]
+        for platform, descriptions in self._descriptions().items():
+            for key, description in descriptions.items():
+                assert description.icon is None, (
+                    f"{platform}.{key} sets icon= instead of using icons.json"
+                )
+        # The three nameless-by-device-class sensors are the ones that need one.
+        assert set(icons["sensor"]) == {"raw_pressure", "raw_temperature", "status"}
+
+    def test_translations_mirror_strings(self):
+        assert self._json("translations/en.json") == self._json("strings.json")
+
+    def test_platform_updates_carry_no_names(self):
+        from custom_components.tesla_tpms_ble import binary_sensor, sensor
+
+        update = TeslaTPMSBluetoothDeviceData().update(service_info(payload()))
+        for module in (sensor, binary_sensor):
+            converted = module.sensor_update_to_bluetooth_data_update(update)
+            assert converted.entity_names, "nothing was converted"
+            assert set(converted.entity_names.values()) == {None}
+
+    def test_platforms_opt_out_of_update_serialisation(self):
+        from custom_components.tesla_tpms_ble import binary_sensor, sensor
+
+        # Everything arrives by advertisement or over one held connection, so
+        # there is nothing to rate-limit.
+        assert sensor.PARALLEL_UPDATES == 0
+        assert binary_sensor.PARALLEL_UPDATES == 0

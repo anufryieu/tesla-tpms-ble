@@ -11,16 +11,23 @@ Assistant started, with counts and timestamps, which is what you need to answer
 sensor is set up for: every Tesla-looking advertisement from elsewhere is kept
 there, shared across all sensors.
 
+A download is meant to be pasted into a bug report, so it carries no full
+Bluetooth addresses: a TPMS address is a stable identifier for a vehicle. The
+sensor's own is redacted, and the addresses under ``other_addresses`` are cut
+back to their manufacturer prefix, because those belong to vehicles and sensors
+that are not the user's. The title is kept -- it is how you tell which of four
+wheels a download came from, and it holds at most a short address. The payload
+bytes, which are what the decode questions turn on, are all still there.
+
 Download it from the device page: **⋮ -> Download diagnostics**.
 """
 from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
 
-from .connection import TeslaTpmsConnection
 from .const import (
     CONF_CONNECT,
     CONF_PRESSURE_TRIM,
@@ -33,17 +40,19 @@ from .const import (
     DOMAIN,
     WATCHER,
 )
-from .parser import TeslaTPMSBluetoothDeviceData
+from .coordinator import TeslaTpmsConfigEntry
 from .watcher import UnknownAddressWatcher
+
+TO_REDACT = {"address"}
 
 
 async def async_get_config_entry_diagnostics(
-    hass: HomeAssistant, entry: ConfigEntry
+    hass: HomeAssistant, entry: TeslaTpmsConfigEntry
 ) -> dict[str, Any]:
     """Return diagnostics for one sensor."""
-    data: TeslaTPMSBluetoothDeviceData | None = hass.data.get(DOMAIN, {}).get(
-        f"{entry.entry_id}_data"
-    )
+    runtime = entry.runtime_data
+    connection = runtime.connection
+    data = runtime.data
 
     diagnostics: dict[str, Any] = {
         "address": entry.unique_id,
@@ -58,40 +67,30 @@ async def async_get_config_entry_diagnostics(
             ),
             "connect": entry.options.get(CONF_CONNECT, DEFAULT_CONNECT),
         },
+        "connection": {
+            "enabled": entry.options.get(CONF_CONNECT, DEFAULT_CONNECT),
+            "learned_request": connection.learned_request,
+            "last_poll_successful": getattr(
+                runtime.coordinator, "last_poll_successful", None
+            ),
+            # The connection is held open between polls. "connected" says
+            # whether the sensor has kept it; "pushed_count" how many readings
+            # it sent without being asked. A count stuck at zero means it only
+            # ever answers, and holding the connection buys nothing over
+            # polling.
+            "connected": connection.connected,
+            "pushed_count": connection.pushed_count,
+            "last_reply": connection.last_reply,
+            "last_replies": connection.last_replies,
+            "last_error": connection.last_error,
+        },
+        "last_decoded_advertisement": (
+            data.last_update_time.isoformat() if data.last_update_time else None
+        ),
+        "payload_history": data.history.as_dict(),
     }
 
-    connection: TeslaTpmsConnection | None = hass.data.get(DOMAIN, {}).get(
-        f"{entry.entry_id}_connection"
-    )
-    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    diagnostics["connection"] = {
-        "enabled": entry.options.get(CONF_CONNECT, DEFAULT_CONNECT),
-        "learned_request": connection.learned_request if connection else None,
-        "last_poll_successful": getattr(coordinator, "last_poll_successful", None),
-        # The connection is held open between polls. "connected" says whether
-        # the sensor has kept it; "pushed_count" how many readings it sent
-        # without being asked. A count stuck at zero means it only ever
-        # answers, and holding the connection buys nothing over polling.
-        "connected": connection.connected if connection else None,
-        "pushed_count": connection.pushed_count if connection else None,
-        "last_reply": connection.last_reply if connection else None,
-        "last_replies": connection.last_replies if connection else [],
-        "last_error": connection.last_error if connection else None,
-    }
-
-    if data is None:
-        diagnostics["error"] = (
-            "The config entry is not loaded, so no payloads have been recorded."
-        )
-        return diagnostics
-
-    last_update = data.last_update_time
-    diagnostics["last_decoded_advertisement"] = (
-        last_update.isoformat() if last_update else None
-    )
-    diagnostics["payload_history"] = data.history.as_dict()
-
-    watcher: UnknownAddressWatcher | None = hass.data[DOMAIN].get(WATCHER)
+    watcher: UnknownAddressWatcher | None = hass.data.get(DOMAIN, {}).get(WATCHER)
     if watcher is not None:
         diagnostics["other_addresses"] = watcher.as_dict()
-    return diagnostics
+    return async_redact_data(diagnostics, TO_REDACT)

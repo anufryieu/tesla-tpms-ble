@@ -161,6 +161,17 @@ ESPHome config that decodes on the ESP32 itself and needs no custom integration
 at all. Put your four MAC addresses in the substitutions block. Use it if you
 would rather not run custom components — but the proxy is the better default.
 
+## Removing it
+
+Delete each sensor from **Settings → Devices & Services → Tesla / Autel BLE
+TPMS** (**⋮ → Delete**), then remove the integration — HACS → ⋮ → **Remove**,
+or delete `custom_components/tesla_tpms_ble/` — and restart. Delete the entries
+first: an entry whose code has gone cannot be removed from the UI.
+
+The sensors are unaffected. Nothing is paired or enrolled, so they keep
+reporting to the car. [docs/INSTALL.md](docs/INSTALL.md#removing-the-integration)
+has the detail.
+
 ## Tools
 
 | Command | Purpose |
