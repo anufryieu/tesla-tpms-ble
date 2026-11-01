@@ -68,6 +68,12 @@ async def async_get_config_entry_diagnostics(
         "enabled": entry.options.get(CONF_CONNECT, DEFAULT_CONNECT),
         "learned_request": connection.learned_request if connection else None,
         "last_poll_successful": getattr(coordinator, "last_poll_successful", None),
+        # The connection is held open between polls. "connected" says whether
+        # the sensor has kept it; "pushed_count" how many readings it sent
+        # without being asked. A count stuck at zero means it only ever
+        # answers, and holding the connection buys nothing over polling.
+        "connected": connection.connected if connection else None,
+        "pushed_count": connection.pushed_count if connection else None,
         "last_reply": connection.last_reply if connection else None,
         "last_replies": connection.last_replies if connection else [],
         "last_error": connection.last_error if connection else None,

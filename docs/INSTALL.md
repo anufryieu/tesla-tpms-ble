@@ -225,8 +225,20 @@ This is **experimental and off by default**:
   help.
 - Pressure from a connection is decoded as whole kPa — a different encoding from
   the advertisement — so trim it against a gauge if needed.
-- Connecting costs the sensor a little battery, so it polls at most every few
-  minutes, only when the sensor is in range.
+- The poll runs on the integration's own 30-second timer, and only while the
+  sensor is in range of something that can connect. It cannot be driven by the
+  advertisement: Home Assistant drops one identical to the previous frame
+  before any integration sees it, and these sensors repeat the same three bytes
+  forever. See [PROTOCOL.md](PROTOCOL.md#why-the-advertisement-cannot-drive-the-poll).
+- The connection is **kept open** between polls, and the integration listens on
+  `0213` while it is idle, so a sensor that volunteers readings is heard at
+  once rather than at the next tick. `connection.pushed_count` in the
+  diagnostics counts those; if it stays at zero, that sensor only ever answers.
+- Each sensor therefore holds one of the adapter's or proxy's BLE connection
+  slots for as long as it is in range. Four wheels take four slots, so check
+  what else that adapter is expected to connect to.
+- Thirty seconds suits a drive; raise `CONNECT_POLL_INTERVAL` in `const.py` if
+  you would rather spend less of the sensor's battery.
 
 **Readings look wrong**
 See [CALIBRATION.md](CALIBRATION.md). There are two decoding profiles and
