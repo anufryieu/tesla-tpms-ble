@@ -7,6 +7,13 @@ so far. A car instead opens a connection and asks for a reading: it writes a
 the sensor's state goes -- it requests a measurement, it never enrols, bonds,
 or writes anything that changes the sensor.
 
+The connection is kept open between polls. Synacktiv's teardown of the Tesla
+side (*0-click RCE on Tesla Model 3 through TPMS Sensors*, Hexacon 2024) shows
+why: a sensor stops advertising once a car connects to it and talks over the
+connection instead. The connection, not the advertisement, is the data path --
+so this holds one, listens on ``0213`` while idle, and only writes a request
+when the sensor has pushed nothing since the last poll.
+
 It is used by the optional active poll in :mod:`__init__`; the pure protocol
 lives in :mod:`decoder` so it stays testable without Bluetooth.
 """
@@ -14,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Final
 
 from bleak import BleakError
@@ -54,13 +62,38 @@ class TeslaTpmsConnection:
     success every later poll is a single write.
     """
 
-    def __init__(self) -> None:
-        """Start with no known-good request frame and no history."""
+    def __init__(
+        self, on_reading: Callable[[TeslaTpmsReading], None] | None = None
+    ) -> None:
+        """Start with no known-good request frame, no client and no history.
+
+        ``on_reading`` is called with any reading the sensor sends unasked
+        while the connection sits idle, so a push reaches the entities without
+        waiting for the next poll.
+        """
         self._good_frame: bytes | None = None
+        self._on_reading = on_reading
+        self._client: BleakClientWithServiceCache | None = None
+        self._listening = False
+        self._pushed: TeslaTpmsReading | None = None
         # Debugging surface for diagnostics: what the sensor last sent back and
         # why the last poll ended as it did. Populated on every poll attempt.
         self.last_replies: list[str] = []
         self.last_error: str | None = None
+        #: Readings the sensor sent without being asked. Zero after a while
+        #: means it only ever answers, and holding the connection buys nothing.
+        self.pushed_count = 0
+
+    def set_reading_callback(
+        self, on_reading: Callable[[TeslaTpmsReading], None]
+    ) -> None:
+        """Say where pushed readings go, once there is something to feed."""
+        self._on_reading = on_reading
+
+    @property
+    def connected(self) -> bool:
+        """Return True while a connection to the sensor is being held open."""
+        return self._client is not None and self._client.is_connected
 
     @property
     def learned_request(self) -> str | None:
@@ -75,13 +108,47 @@ class TeslaTpmsConnection:
     async def async_poll(
         self, hass: HomeAssistant, service_info: BluetoothServiceInfoBleak
     ) -> TeslaTpmsReading:
-        """Connect, request a reading, and return it.
+        """Return a reading, over a connection that is held open afterwards.
+
+        If the sensor pushed one since the last call, that is returned and
+        nothing is written. Otherwise it is asked, over the held connection if
+        there is one and a fresh one if not.
 
         Raises :class:`NoTPDataReply` if the sensor is reachable but says
         nothing decodable, or :class:`BleakError` if it cannot be connected --
         both of which the active coordinator treats as an ordinary failed poll.
         The failure reason is also kept in ``last_error`` for the diagnostics.
         """
+        if (pushed := self._pushed) is not None:
+            # The sensor spoke on its own since the last poll. Nothing to ask.
+            self._pushed = None
+            self.last_error = None
+            return pushed
+
+        client = await self._async_client(hass, service_info)
+        # The request path installs its own handler on 0213, so stand down the
+        # idle listener for the length of the exchange.
+        await self._async_stop_listening()
+        try:
+            reading = await self._async_request(client)
+        except BleakError as exc:
+            self.last_error = str(exc)
+            # A failed exchange says nothing good about the connection; drop it
+            # so the next poll starts clean rather than inheriting the trouble.
+            await self.async_close()
+            raise
+        await self._async_listen()
+        self.last_error = None
+        return reading
+
+    async def _async_client(
+        self, hass: HomeAssistant, service_info: BluetoothServiceInfoBleak
+    ) -> BleakClientWithServiceCache:
+        """Return the held connection, opening one if there is none."""
+        if self.connected:
+            assert self._client is not None
+            return self._client
+
         address = service_info.address
         ble_device = async_ble_device_from_address(hass, address, connectable=True)
         if ble_device is None:
@@ -92,20 +159,74 @@ class TeslaTpmsConnection:
 
         try:
             client = await establish_connection(
-                BleakClientWithServiceCache, ble_device, service_info.name or address
+                BleakClientWithServiceCache,
+                ble_device,
+                service_info.name or address,
+                disconnected_callback=self._on_disconnect,
             )
         except BleakError as exc:
             self.last_error = f"connect failed: {exc}"
             raise
+        self._client = client
+        self._listening = False
+        return client
+
+    async def _async_listen(self) -> None:
+        """Subscribe to 0213 for whatever the sensor says while we sit idle."""
+        if self._listening or not self.connected:
+            return
+        assert self._client is not None
         try:
-            reading = await self._async_request(client)
+            await self._client.start_notify(CHAR_INDICATE, self._on_push)
         except BleakError as exc:
-            self.last_error = str(exc)
-            raise
-        finally:
+            # Not fatal: the next poll still asks over the same connection.
+            _LOGGER.debug("cannot listen on 0213: %s", exc)
+            return
+        self._listening = True
+
+    async def _async_stop_listening(self) -> None:
+        """Hand 0213 back, so a request can install its own handler."""
+        if not self._listening:
+            return
+        self._listening = False
+        if not self.connected:
+            return
+        assert self._client is not None
+        try:
+            await self._client.stop_notify(CHAR_INDICATE)
+        except BleakError:
+            pass
+
+    def _on_push(self, _handle: int, data: bytearray) -> None:
+        """Handle an indication the sensor sent without being asked."""
+        payload = bytes(data)
+        self.last_replies = [payload.hex()]
+        reading = decode_tpdata(payload)
+        if reading is None:
+            _LOGGER.debug("unsolicited indication, undecodable: %s", payload.hex())
+            return
+        self.pushed_count += 1
+        if self._on_reading is not None:
+            self._on_reading(reading)
+        else:
+            # Nobody is listening yet; keep it for the next poll to return.
+            self._pushed = reading
+
+    def _on_disconnect(self, _client: BleakClientWithServiceCache) -> None:
+        """Note that the sensor hung up, so the next poll reconnects."""
+        self._listening = False
+        self._client = None
+
+    async def async_close(self) -> None:
+        """Drop the held connection, on unload or after a failed exchange."""
+        client, self._client = self._client, None
+        self._listening = False
+        if client is None:
+            return
+        try:
             await client.disconnect()
-        self.last_error = None
-        return reading
+        except BleakError as exc:
+            _LOGGER.debug("disconnect failed: %s", exc)
 
     async def _async_request(self, client: BleakClientWithServiceCache) -> TeslaTpmsReading:
         """Subscribe to 0213, write request frame(s), parse the first reply."""

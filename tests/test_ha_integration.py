@@ -570,3 +570,54 @@ class TestTimedPoll:
         # Both go through the debouncer the advertisement path uses, so the two
         # triggers cannot stack into overlapping connections to one sensor.
         assert coordinator._debounced_poll.calls == 2
+
+
+class TestHeldConnection:
+    """The connection is kept open, and a pushed reading is used as-is.
+
+    A sensor stops advertising once something connects to it and talks over
+    the connection instead, so the connection is the data path -- see
+    docs/PROTOCOL.md.
+    """
+
+    # A real reply from sensor 10B2: raw pressure 527 (~2.91 bar), temp 19 C.
+    REAL_REPLY = bytes.fromhex("1208e20105088f041026")
+
+    def _conn(self, **kwargs):
+        from custom_components.tesla_tpms_ble.connection import TeslaTpmsConnection
+
+        return TeslaTpmsConnection(**kwargs)
+
+    def test_pushed_reading_reaches_the_callback(self):
+        got = []
+        conn = self._conn(on_reading=got.append)
+        conn._on_push(0, bytearray(self.REAL_REPLY))
+        assert len(got) == 1
+        assert got[0].pressure_bar == pytest.approx(4.26, abs=0.01)
+        assert conn.pushed_count == 1
+        assert conn.last_reply == self.REAL_REPLY.hex()
+
+    def test_undecodable_push_is_not_counted(self):
+        got = []
+        conn = self._conn(on_reading=got.append)
+        conn._on_push(0, bytearray(b"\xff\xff\xff"))
+        assert got == []
+        assert conn.pushed_count == 0
+
+    def test_poll_returns_a_push_without_connecting(self):
+        # With nobody listening yet, a push is kept for the next poll, which
+        # must then not touch Bluetooth at all -- hence the None arguments.
+        conn = self._conn()
+        conn._on_push(0, bytearray(self.REAL_REPLY))
+        reading = asyncio.run(conn.async_poll(None, None))
+        assert reading.pressure_bar == pytest.approx(4.26, abs=0.01)
+        # Consumed: a second poll would have to ask for itself.
+        assert conn._pushed is None
+
+    def test_disconnect_clears_the_held_client(self):
+        conn = self._conn()
+        conn._client = object()
+        conn._listening = True
+        conn._on_disconnect(conn._client)
+        assert conn.connected is False
+        assert conn._listening is False
