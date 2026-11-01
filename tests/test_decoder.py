@@ -1,12 +1,15 @@
 """Tests for the Tesla-protocol TPMS decoder."""
 import sys
 from pathlib import Path
+from typing import ClassVar
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "custom_components" / "tesla_tpms_ble"))
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[1] / "custom_components" / "tesla_tpms_ble")
+)
 
-import pytest  # noqa: E402
+import pytest
 
-from decoder import (  # noqa: E402
+from decoder import (
     PROFILE_DEFAULT,
     PROFILE_LEGACY,
     TESLA_COMPANY_ID,
@@ -252,7 +255,7 @@ class TestDecodeTPData:
     # Real replies captured from the four fitted Autel sensors, with the owner's
     # gauge reading alongside (gauge psi) -- this pinned the kPa-absolute scale.
     # Nesting: field 2 -> field 28 -> {field 1 = pressure, field 2 = temp}.
-    REAL_REPLIES = {
+    REAL_REPLIES: ClassVar[dict[str, tuple[str, int, int, int, float]]] = {
         "10F1": ("1208e20105089e041026", 542, 38, 19, 64.5),  # rear right
         "1104": ("1208e20105089a041024", 538, 36, 18, 63.5),  # rear left
         "10B2": ("1208e20105088f041026", 527, 38, 19, 62.0),  # front

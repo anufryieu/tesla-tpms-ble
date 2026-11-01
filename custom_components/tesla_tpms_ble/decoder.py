@@ -170,7 +170,8 @@ def looks_like_tesla_tpms(mfr_data: bytes | bytearray | None) -> bool:
     if len(mfr_data) < MIN_PAYLOAD_LEN:
         return False
     battery_mv = int.from_bytes(mfr_data[6:8], "little")
-    # 1.8 V .. 4.2 V covers every lithium chemistry used in TPMS sensors.
+    # 1.5 V .. 4.3 V brackets every lithium chemistry used in TPMS sensors, with
+    # enough margin either side that a flat cell still reads as a sensor.
     return 1500 <= battery_mv <= 4300
 
 
@@ -198,7 +199,7 @@ def battery_percentage(volts: float) -> int:
         v_hi, p_hi = curve[i]
         v_lo, p_lo = curve[i + 1]
         if v_lo < volts <= v_hi:
-            return int(round(p_lo + ((volts - v_lo) / (v_hi - v_lo)) * (p_hi - p_lo)))
+            return round(p_lo + ((volts - v_lo) / (v_hi - v_lo)) * (p_hi - p_lo))
     return 0
 
 

@@ -21,10 +21,11 @@ With ``--request`` it also does what a car does on the *normal* pressure-read
 path: it writes a ``TPDataRequest`` to 0212 and watches 0213 for the matching
 ``TPData``. That is a plain "tell me your pressure and temperature" message —
 not enrolment, not the certificate exchange, nothing that changes the sensor.
-The request bytes are built from the protobuf field numbers documented in
-``docs/PROTOCOL.md``; because the outer VCSEC framing is not fully pinned down,
-several documented encodings are tried in turn, and ``--request-hex`` lets you
-write one exact frame if you already know it.
+The request bytes come from the integration's own ``decoder.py``, so this probe
+writes exactly what the integration writes; because the outer VCSEC framing is
+not fully pinned down, several documented encodings are tried in turn, and
+``--request-hex`` lets you write one exact frame if you already know it. Any
+reply is decoded with the same ``decode_tpdata()`` the integration uses.
 
     python3 tools/tpms_gatt.py                 # read-only: pick the strongest sensor
     python3 tools/tpms_gatt.py --list          # just list tsTPMS sensors, don't connect
@@ -49,8 +50,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import sys
 from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[1] / "custom_components" / "tesla_tpms_ble")
+)
+
+from decoder import build_tpdata_requests, decode_tpdata
 
 # Tesla VCSEC communication service and its three characteristics.
 TESLA_SERVICE = "00000211-b2d1-43f0-9b88-960cebf8b91e"
@@ -84,33 +93,31 @@ def ts() -> str:
     return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
-# Candidate TPDataRequest frames to write to 0212.
-#
-# docs/PROTOCOL.md records the reverse-engineered messages:
-#     enum TPDataRequest_E { ... TP_DATAREQUEST_PRESSURE_TEMPERATURE = 1; ... }
-# and notes the two sides speak "length-prefixed Protocol Buffers" over 0212/0213.
-#
-# The inner request is almost certainly a single enum field set to 1, which in
-# protobuf wire form is tag 0x08 (field 1, varint) + value 0x01 -> "08 01".
-# What wraps it is the open question: it may be sent bare, nested in an outer
-# VCSEC message as a length-delimited field (tag 0x0a/0x12/0x1a = field 1/2/3),
-# and/or prefixed with a 2-byte big-endian length. We try the documented
-# possibilities from simplest outward and stop at the first that draws a reply.
-# None of these enrol, bond, or carry a certificate; the worst case is that the
-# sensor ignores an unrecognised frame.
+def describe_frame(frame: bytes) -> str:
+    """Name one candidate frame by its shape, for the log line.
+
+    Derived from the bytes rather than from a parallel list, so the probe
+    cannot drift out of step with ``build_tpdata_requests()``.
+    """
+    body, suffix = frame, ""
+    if len(frame) > 2 and int.from_bytes(frame[:2], "big") == len(frame) - 2:
+        body, suffix = frame[2:], ", 2-byte length prefix"
+    if len(body) > 2 and body[1] == len(body) - 2 and body[0] & 0x07 == 2:
+        return f"wrapped as field {body[0] >> 3}{suffix}"
+    return f"bare TPDataRequest{suffix}"
+
+
 def request_candidates() -> list[tuple[str, bytes]]:
-    """Return (description, bytes) request frames to try, simplest first."""
-    inner = bytes.fromhex("0801")  # TPDataRequest{ request = PRESSURE_TEMPERATURE }
-    candidates: list[tuple[str, bytes]] = [("bare TPDataRequest", inner)]
-    for field_tag in (0x0A, 0x12, 0x1A):  # wrapped as outer field 1 / 2 / 3
-        wrapped = bytes([field_tag, len(inner)]) + inner
-        candidates.append((f"wrapped as field {(field_tag >> 3)}", wrapped))
-    # Same set again, each behind a 2-byte big-endian length prefix.
-    prefixed = [
-        (f"{desc}, 2-byte length prefix", len(body).to_bytes(2, "big") + body)
-        for desc, body in list(candidates)
-    ]
-    return candidates + prefixed
+    """Return (description, bytes) request frames to try, simplest first.
+
+    The frames are the integration's own, from ``decoder.build_tpdata_requests``,
+    so whatever this probe finds is exactly what ``connection.py`` will send.
+    The inner request is a single enum field set to 1 (``08 01`` on the wire);
+    the outer VCSEC framing is not public, so the documented possibilities are
+    tried from simplest outward. None of them enrol, bond, or carry a
+    certificate; the worst case is that the sensor ignores an unknown frame.
+    """
+    return [(describe_frame(frame), frame) for frame in build_tpdata_requests()]
 
 
 async def discover(duration: float):
@@ -216,10 +223,27 @@ async def probe(
             got: list[bytes] = []
 
             def on_indicate(_handle, data: bytearray):
-                got.append(bytes(data))
+                raw = bytes(data)
+                got.append(raw)
                 print(
-                    f"{GREEN}{ts()} indicate 0213: {bytes(data).hex(' ')}{RESET}"
-                    f"  {DIM}({len(data)} bytes){RESET}"
+                    f"{GREEN}{ts()} indicate 0213: {raw.hex(' ')}{RESET}"
+                    f"  {DIM}({len(raw)} bytes){RESET}"
+                )
+                # Decode it with the integration's own TPData decoder, so the
+                # probe says whether this reply is usable, not just that it came.
+                reading = decode_tpdata(raw)
+                if reading is None:
+                    print(f"    {YELLOW}not decodable as TPData{RESET}")
+                    return
+                temp = (
+                    f"{reading.temperature_c:.0f} °C"
+                    if reading.temperature_c is not None
+                    else "no temperature"
+                )
+                print(
+                    f"    {CYAN}TPData{RESET}: {reading.pressure_bar:.2f} bar "
+                    f"({reading.pressure_psi:.1f} psi) | {temp} "
+                    f"{DIM}| raw {reading.raw}{RESET}"
                 )
 
             unsolicited = 0
@@ -251,10 +275,9 @@ async def probe(
                         # requests had already gone unanswered.
                         replied_to = "(passive, after requests)"
                 finally:
-                    try:
+                    # Disconnecting anyway; a failed unsubscribe changes nothing.
+                    with contextlib.suppress(Exception):
                         await client.stop_notify(CHAR_INDICATE)
-                    except Exception:  # noqa: BLE001
-                        pass
 
             print(f"\n{BOLD}── result ──{RESET}")
             if replied_to and replied_to.startswith("("):
@@ -329,7 +352,7 @@ async def run(args) -> int:
 
     print(f"\n{BOLD}tsTPMS sensors heard:{RESET}")
     ranked = sorted(found.items(), key=lambda kv: kv[1][1], reverse=True)
-    for addr, (name, rssi) in ranked:
+    for addr, (_name, rssi) in ranked:
         print(f"  {addr}  {rssi} dBm")
 
     if args.list:

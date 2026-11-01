@@ -1,7 +1,7 @@
 """End-to-end tests through the real Home Assistant parser pipeline.
 
-Skipped automatically if Home Assistant is not installed, so the pure decoder
-tests still run anywhere.
+Skipped automatically if the Home Assistant Bluetooth stack is not installed,
+so the pure decoder tests still run anywhere.
 """
 import asyncio
 import json
@@ -12,17 +12,23 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-ha = pytest.importorskip("homeassistant.const")
-bsd = pytest.importorskip("bluetooth_sensor_state_data")
+# Skip on what the integration actually imports. `homeassistant.const` is
+# satisfied by a bare `pip install homeassistant`, but the package __init__
+# imports homeassistant.components.bluetooth, which pulls in the usb
+# integration and its requirements -- those ship with Home Assistant the
+# application, not with the homeassistant wheel. Guarding on const alone turned
+# a partial install into a collection error instead of a skip.
+pytest.importorskip("homeassistant.components.bluetooth")
+pytest.importorskip("bluetooth_sensor_state_data")
 
-from home_assistant_bluetooth import BluetoothServiceInfo  # noqa: E402
+from home_assistant_bluetooth import BluetoothServiceInfo
 
-from custom_components.tesla_tpms_ble.parser import (  # noqa: E402
+from custom_components.tesla_tpms_ble.parser import (
     TeslaTPMSBluetoothDeviceData,
     TPMSBinarySensor,
     TPMSSensor,
 )
-from custom_components.tesla_tpms_ble.decoder import (  # noqa: E402
+from custom_components.tesla_tpms_ble.decoder import (
     PROFILE_LEGACY,
     TESLA_COMPANY_ID,
 )

@@ -1,11 +1,13 @@
 # Installing into Home Assistant
 
-The integration is 13 files in one folder. Installing it means getting that
+The integration is 14 files in one folder. Installing it means getting that
 folder to `<config>/custom_components/tesla_tpms_ble/` on your HA machine and
 restarting. Everything below is just different ways of moving a folder.
 
 `<config>` is wherever your `configuration.yaml` lives — `/config` on HA OS and
 in the container images, `~/.homeassistant` for a `pip` install.
+
+Home Assistant **2024.12 or newer** is required.
 
 ---
 
@@ -47,7 +49,7 @@ You should end up with `config/custom_components/tesla_tpms_ble/manifest.json`.
 
 1. Open the add-on.
 2. Create `custom_components/tesla_tpms_ble/` if it does not exist.
-3. Upload the 13 files, keeping `translations/en.json` in its subfolder.
+3. Upload all 14 files, keeping `translations/en.json` in its subfolder.
 
 Studio Code Server can drag-and-drop a whole folder into its file tree, which is
 much less tedious than uploading one file at a time.

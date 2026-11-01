@@ -16,14 +16,15 @@ what you want when calibrating the formulas against a reference gauge (see
 docs/CALIBRATION.md).
 
 Note on sleepy sensors: a TPMS sensor that is not fitted, not pressurised and
-not moving transmits rarely or not at all. See the README's "Waking the
-sensors" section if nothing shows up.
+not moving transmits rarely or not at all. See "Before you install: wake the
+sensors" in the README if nothing shows up.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -33,7 +34,7 @@ sys.path.insert(
     0, str(Path(__file__).resolve().parents[1] / "custom_components" / "tesla_tpms_ble")
 )
 
-from decoder import (  # noqa: E402
+from decoder import (
     PROFILES,
     TESLA_COMPANY_ID,
     decode,
@@ -122,7 +123,9 @@ def fmt_reading(address, name, rssi, reading, show_raw):
 async def run(args) -> int:
     profile = PROFILES[args.profile]
     tracker = Tracker()
-    log_fh = open(args.log, "a", encoding="utf-8") if args.log else None
+    # Kept open for the whole scan and closed in the finally below; a context
+    # manager would have to wrap the entire run for an optional file.
+    log_fh = open(args.log, "a", encoding="utf-8") if args.log else None  # noqa: SIM115
 
     print(f"{BOLD}Tesla-protocol BLE TPMS scanner{RESET}")
     print(
@@ -198,10 +201,9 @@ async def run(args) -> int:
     except asyncio.CancelledError:
         pass
     finally:
-        try:
+        # The adapter may already be gone; the summary below still stands.
+        with contextlib.suppress(Exception):
             await scanner.stop()
-        except Exception:
-            pass
         if log_fh:
             log_fh.close()
 
