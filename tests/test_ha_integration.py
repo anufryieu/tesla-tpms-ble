@@ -527,3 +527,103 @@ class TestConnectionRequest:
         client = _FakeClient(answers_to=None, reply=b"", props=("read",))
         with pytest.raises(NoTPDataReply):
             asyncio.run(TeslaTpmsConnection()._async_request(client))
+
+
+class _FakeDebouncer:
+    """Stands in for the coordinator's poll debouncer."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def async_schedule_call(self):
+        self.calls += 1
+
+
+class TestTimedPoll:
+    """The poll runs on the integration's own clock, not on advertisements.
+
+    Home Assistant returns before calling any listener when an advertisement
+    matches the previous one, and these sensors repeat one constant sleep
+    frame, so nothing would ever trigger a second poll. Measured on a drive:
+    two readings in three hours. Regression cover for that.
+    """
+
+    def _coordinator(self):
+        from custom_components.tesla_tpms_ble import TeslaTpmsCoordinator
+
+        # Bypass __init__: it wants a live hass, and the two hooks under test
+        # read nothing but the attributes set here.
+        coordinator = object.__new__(TeslaTpmsCoordinator)
+        coordinator._last_service_info = None
+        coordinator._debounced_poll = _FakeDebouncer()
+        return coordinator
+
+    def test_interval_is_short_enough_to_follow_a_drive(self):
+        from custom_components.tesla_tpms_ble.const import CONNECT_POLL_INTERVAL
+
+        assert CONNECT_POLL_INTERVAL == 30.0
+
+    def test_no_poll_before_the_sensor_has_ever_been_heard(self):
+        # Nothing to connect to yet, so the timer must leave it alone.
+        assert self._coordinator().has_service_info is False
+
+    def test_poll_requested_through_the_shared_debouncer(self):
+        coordinator = self._coordinator()
+        coordinator._last_service_info = service_info(REAL_SLEEP_FRAME)
+        assert coordinator.has_service_info is True
+        coordinator.async_request_poll()
+        coordinator.async_request_poll()
+        # Both go through the debouncer the advertisement path uses, so the two
+        # triggers cannot stack into overlapping connections to one sensor.
+        assert coordinator._debounced_poll.calls == 2
+
+
+class TestHeldConnection:
+    """The connection is kept open, and a pushed reading is used as-is.
+
+    A sensor stops advertising once something connects to it and talks over
+    the connection instead, so the connection is the data path -- see
+    docs/PROTOCOL.md.
+    """
+
+    # A real reply from sensor 10B2: raw pressure 527 (~2.91 bar), temp 19 C.
+    REAL_REPLY = bytes.fromhex("1208e20105088f041026")
+
+    def _conn(self, **kwargs):
+        from custom_components.tesla_tpms_ble.connection import TeslaTpmsConnection
+
+        return TeslaTpmsConnection(**kwargs)
+
+    def test_pushed_reading_reaches_the_callback(self):
+        got = []
+        conn = self._conn(on_reading=got.append)
+        conn._on_push(0, bytearray(self.REAL_REPLY))
+        assert len(got) == 1
+        assert got[0].pressure_bar == pytest.approx(4.26, abs=0.01)
+        assert conn.pushed_count == 1
+        assert conn.last_reply == self.REAL_REPLY.hex()
+
+    def test_undecodable_push_is_not_counted(self):
+        got = []
+        conn = self._conn(on_reading=got.append)
+        conn._on_push(0, bytearray(b"\xff\xff\xff"))
+        assert got == []
+        assert conn.pushed_count == 0
+
+    def test_poll_returns_a_push_without_connecting(self):
+        # With nobody listening yet, a push is kept for the next poll, which
+        # must then not touch Bluetooth at all -- hence the None arguments.
+        conn = self._conn()
+        conn._on_push(0, bytearray(self.REAL_REPLY))
+        reading = asyncio.run(conn.async_poll(None, None))
+        assert reading.pressure_bar == pytest.approx(4.26, abs=0.01)
+        # Consumed: a second poll would have to ask for itself.
+        assert conn._pushed is None
+
+    def test_disconnect_clears_the_held_client(self):
+        conn = self._conn()
+        conn._client = object()
+        conn._listening = True
+        conn._on_disconnect(conn._client)
+        assert conn.connected is False
+        assert conn._listening is False

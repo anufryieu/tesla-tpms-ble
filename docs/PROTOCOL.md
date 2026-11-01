@@ -96,6 +96,27 @@ what is happening.
 Integration version 1.0.0 required 8 bytes from every frame, so it rejected
 these three-byte sleep frames. The sensors were heard but never offered.
 
+### Why the advertisement cannot drive the poll
+
+Home Assistant's active Bluetooth coordinator asks "is a poll due?" only when
+it receives an advertisement. That is the wrong trigger for these sensors, and
+the reason is upstream in `habluetooth`: before calling any listener, the
+manager compares the new advertisement against the last one from that address
+and returns early when the manufacturer data, service data, service UUIDs and
+name all match. A sensor repeating one constant frame is therefore heard once
+and then silently dropped, however often it transmits.
+
+The fitted Autel units send `01 FE 03` about once a second and never vary it.
+Measured over one drive, Home Assistant dispatched two advertisement events in
+three hours — once when the sensor came back into range, once nearly two hours
+later — and the pressure sat frozen between them. The diagnostics show the
+same thing from the other end: 18 forwarded advertisements across four days,
+two distinct payloads.
+
+So the integration keeps its own timer (`CONNECT_POLL_INTERVAL`) and asks the
+coordinator to poll from that, routing the request through the same debouncer
+the advertisement path uses. See `TeslaTpmsCoordinator` in `__init__.py`.
+
 ### Distinguishing a sensor from a car
 
 Tesla *vehicles* also advertise under company ID `0x022B`. Matching on the
@@ -196,10 +217,31 @@ enum TPDataRequest_E   { ... TP_DATAREQUEST_PRESSURE_TEMPERATURE = 1; ... }
 ```
 
 The car sends a `TPDataRequest` on `0212`; the sensor answers with `TPData` (and
-`TPWheelUnitInfo` for battery) as an indication on `0213`. There is no
-encryption on this exchange — enrolment is by MAC allowlist plus a drive-based
-"auto-learn" — but nothing replies until a request is written, and the sensor
-drops an idle connection after about 15 seconds.
+`TPWheelUnitInfo` for battery) as an indication on `0213`. Nothing replies until
+a request is written, and the sensor drops an idle connection after about 15
+seconds.
+
+### What the advertisement is for
+
+[Synacktiv's slides][hexacon] (pages 28–30) describe the car's side of this, and it
+settles what the advertisement is: a doorbell, not a data channel. The sensor
+wakes on wheel movement and starts advertising; the car sees the advertisement
+and connects **if the MAC is on its enrolled list**; and once the connection is
+up, the sensor stops advertising altogether. Their summary of the security on
+that path is blunt — "There is no security except the MAC address list."
+
+Two consequences for this integration:
+
+- **Enrolment lives in the car, not in the sensor.** It is an allowlist of MAC
+  addresses, topped up by an auto-learn that runs once the car has driven above
+  25 km/h for 90 seconds, which also works out which sensor is on which wheel
+  from the signal at its five BLE receivers. Nothing is written into a sensor,
+  so there is no "pair with it and it will broadcast readings" to be had.
+- **Holding the connection is the normal mode**, not an optimisation. A sensor
+  that is connected has nothing to say on the air by design. So this
+  integration keeps the connection open and listens on `0213` between polls:
+  see `TeslaTpmsConnection` in `connection.py`, and `pushed_count` in the
+  diagnostics for whether a given sensor volunteers anything.
 
 `TPData.pressure` is **not** the advertisement's raw pressure field. It is a
 separate integer arriving on a separate path, and it needed its own calibration;
@@ -284,3 +326,4 @@ turned out to be a camper; the gauge reading settled it.
   is untested — that is what the `Raw` diagnostics are for.
 
 [upstream]: https://github.com/cunzulatu/Tesla_BLE_TPMS
+[hexacon]: https://www.synacktiv.com/sites/default/files/2024-10/hexacon_0_click_rce_on_tesla_model_3_through_tpms_sensors_light.pdf

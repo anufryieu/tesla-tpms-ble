@@ -21,6 +21,13 @@ DEFAULT_TEMPERATURE_TRIM = 0.0
 CONF_CONNECT = "connect"
 DEFAULT_CONNECT = False
 
-# Don't poll more often than this many seconds, even though an advertisement
-# (the poll trigger) may arrive more frequently.
-CONNECT_POLL_INTERVAL = 300.0
+# How often to ask a sensor for a reading, in seconds. This is the integration's
+# own clock: the advertisement cannot drive the poll, because Home Assistant
+# drops an advertisement identical to the previous one and these sensors repeat
+# one constant sleep frame forever. See TeslaTpmsCoordinator in __init__.py.
+#
+# It is also the floor for the advertisement-driven poll, for the rare occasions
+# when an advertisement does get through.
+#
+# Every poll is a GATT connection, so this trades sensor battery for resolution.
+CONNECT_POLL_INTERVAL = 30.0
