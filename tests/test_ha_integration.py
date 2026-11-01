@@ -521,3 +521,52 @@ class TestConnectionRequest:
         client = _FakeClient(answers_to=None, reply=b"", props=("read",))
         with pytest.raises(NoTPDataReply):
             asyncio.run(TeslaTpmsConnection()._async_request(client))
+
+
+class _FakeDebouncer:
+    """Stands in for the coordinator's poll debouncer."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def async_schedule_call(self):
+        self.calls += 1
+
+
+class TestTimedPoll:
+    """The poll runs on the integration's own clock, not on advertisements.
+
+    Home Assistant returns before calling any listener when an advertisement
+    matches the previous one, and these sensors repeat one constant sleep
+    frame, so nothing would ever trigger a second poll. Measured on a drive:
+    two readings in three hours. Regression cover for that.
+    """
+
+    def _coordinator(self):
+        from custom_components.tesla_tpms_ble import TeslaTpmsCoordinator
+
+        # Bypass __init__: it wants a live hass, and the two hooks under test
+        # read nothing but the attributes set here.
+        coordinator = object.__new__(TeslaTpmsCoordinator)
+        coordinator._last_service_info = None
+        coordinator._debounced_poll = _FakeDebouncer()
+        return coordinator
+
+    def test_interval_is_short_enough_to_follow_a_drive(self):
+        from custom_components.tesla_tpms_ble.const import CONNECT_POLL_INTERVAL
+
+        assert CONNECT_POLL_INTERVAL == 30.0
+
+    def test_no_poll_before_the_sensor_has_ever_been_heard(self):
+        # Nothing to connect to yet, so the timer must leave it alone.
+        assert self._coordinator().has_service_info is False
+
+    def test_poll_requested_through_the_shared_debouncer(self):
+        coordinator = self._coordinator()
+        coordinator._last_service_info = service_info(REAL_SLEEP_FRAME)
+        assert coordinator.has_service_info is True
+        coordinator.async_request_poll()
+        coordinator.async_request_poll()
+        # Both go through the debouncer the advertisement path uses, so the two
+        # triggers cannot stack into overlapping connections to one sensor.
+        assert coordinator._debounced_poll.calls == 2

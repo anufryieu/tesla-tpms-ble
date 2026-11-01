@@ -225,8 +225,14 @@ This is **experimental and off by default**:
   help.
 - Pressure from a connection is decoded as whole kPa — a different encoding from
   the advertisement — so trim it against a gauge if needed.
-- Connecting costs the sensor a little battery, so it polls at most every few
-  minutes, only when the sensor is in range.
+- The poll runs on the integration's own 30-second timer, and only while the
+  sensor is in range of something that can connect. It cannot be driven by the
+  advertisement: Home Assistant drops one identical to the previous frame
+  before any integration sees it, and these sensors repeat the same three bytes
+  forever. See [PROTOCOL.md](PROTOCOL.md#why-the-advertisement-cannot-drive-the-poll).
+- Every poll is a GATT connection, which costs the sensor a little battery.
+  Thirty seconds suits a drive; raise `CONNECT_POLL_INTERVAL` in `const.py` if
+  you would rather spend less.
 
 **Readings look wrong**
 See [CALIBRATION.md](CALIBRATION.md). There are two decoding profiles and

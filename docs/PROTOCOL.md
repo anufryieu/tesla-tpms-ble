@@ -94,6 +94,27 @@ what is happening.
 Integration version 1.0.0 required 8 bytes from every frame, so it rejected
 these three-byte sleep frames. The sensors were heard but never offered.
 
+### Why the advertisement cannot drive the poll
+
+Home Assistant's active Bluetooth coordinator asks "is a poll due?" only when
+it receives an advertisement. That is the wrong trigger for these sensors, and
+the reason is upstream in `habluetooth`: before calling any listener, the
+manager compares the new advertisement against the last one from that address
+and returns early when the manufacturer data, service data, service UUIDs and
+name all match. A sensor repeating one constant frame is therefore heard once
+and then silently dropped, however often it transmits.
+
+The fitted Autel units send `01 FE 03` about once a second and never vary it.
+Measured over one drive, Home Assistant dispatched two advertisement events in
+three hours — once when the sensor came back into range, once nearly two hours
+later — and the pressure sat frozen between them. The diagnostics show the
+same thing from the other end: 18 forwarded advertisements across four days,
+two distinct payloads.
+
+So the integration keeps its own timer (`CONNECT_POLL_INTERVAL`) and asks the
+coordinator to poll from that, routing the request through the same debouncer
+the advertisement path uses. See `TeslaTpmsCoordinator` in `__init__.py`.
+
 ### Distinguishing a sensor from a car
 
 Tesla *vehicles* also advertise under company ID `0x022B`. Matching on the

@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 
 from homeassistant.components.bluetooth import (
     BluetoothScanningMode,
     BluetoothServiceInfoBleak,
+    async_address_present,
 )
 from homeassistant.components.bluetooth.active_update_processor import (
     ActiveBluetoothProcessorCoordinator,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import CoreState, HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant, callback
+from homeassistant.helpers.event import async_track_time_interval
 
 from .connection import TeslaTpmsConnection
 from .const import (
@@ -35,6 +38,36 @@ from .watcher import UnknownAddressWatcher
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class TeslaTpmsCoordinator(ActiveBluetoothProcessorCoordinator):
+    """An active coordinator that can also poll on a clock of its own.
+
+    Home Assistant hangs the active poll off the Bluetooth event, and
+    habluetooth returns before calling any listener when an advertisement
+    matches the previous one. These sensors repeat one constant three-byte
+    sleep frame about once a second, so that event fires only when the sensor
+    drops out of range and comes back: measured on one drive, twice in three
+    hours, with the pressure frozen in between. Hence a timer, in
+    ``async_setup_entry``, and these two hooks for it.
+    """
+
+    @property
+    def has_service_info(self) -> bool:
+        """Return True once an advertisement has been seen.
+
+        The poll needs one: it is what carries the address to connect to.
+        """
+        return self._last_service_info is not None
+
+    @callback
+    def async_request_poll(self) -> None:
+        """Queue a poll now, independently of advertisement traffic.
+
+        Goes through the same debouncer as the advertisement-driven path, so
+        the two cannot stack up on one sensor.
+        """
+        self._debounced_poll.async_schedule_call()
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -80,9 +113,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         reading = await connection.async_poll(hass, service_info)
         return data.update_from_connection(reading, service_info)
 
-    coordinator = hass.data[DOMAIN][
-        entry.entry_id
-    ] = ActiveBluetoothProcessorCoordinator(
+    coordinator = hass.data[DOMAIN][entry.entry_id] = TeslaTpmsCoordinator(
         hass,
         _LOGGER,
         address=address,
@@ -91,6 +122,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         needs_poll_method=_needs_poll,
         poll_method=_poll,
         connectable=False,
+    )
+
+    @callback
+    def _async_timed_poll(_now: datetime) -> None:
+        """Ask for a reading on our own clock. See :class:`TeslaTpmsCoordinator`."""
+        if not entry.options.get(CONF_CONNECT, DEFAULT_CONNECT):
+            return
+        if hass.state is not CoreState.running:
+            return
+        if not coordinator.has_service_info:
+            # Never heard from this sensor, so there is no address to connect to.
+            return
+        if not async_address_present(hass, address, connectable=True):
+            # Nothing that can open a connection is in range of it. Skip rather
+            # than spend an attempt that can only fail -- but say so, because a
+            # passive-only proxy looks exactly like this and never recovers.
+            _LOGGER.debug("%s: no connectable path in range, skipping poll", address)
+            return
+        coordinator.async_request_poll()
+
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass, _async_timed_poll, timedelta(seconds=CONNECT_POLL_INTERVAL)
+        )
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
