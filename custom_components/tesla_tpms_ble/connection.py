@@ -193,10 +193,9 @@ class TeslaTpmsConnection:
         if not self.connected:
             return
         assert self._client is not None
-        try:
+        # The link may have dropped already: handing the handle back is enough.
+        with contextlib.suppress(BleakError):
             await self._client.stop_notify(CHAR_INDICATE)
-        except BleakError:
-            pass
 
     def _on_push(self, _handle: int, data: bytearray) -> None:
         """Handle an indication the sensor sent without being asked."""

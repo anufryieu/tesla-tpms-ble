@@ -164,7 +164,11 @@ experimental and off by default:
 
 - it needs a *connectable* path — a local adapter, or an ESPHome proxy with
   active connections enabled; a passive-only proxy cannot open a connection
-- it polls at most every five minutes, because connecting costs sensor battery
+- it polls on its own 30-second timer (`CONNECT_POLL_INTERVAL` in `const.py`),
+  and keeps the connection open between polls so a sensor that volunteers a
+  reading is heard at once
+- each sensor therefore holds one of that adapter's or proxy's connection slots
+  while it is in range — four wheels take four slots
 - it asks for a measurement and nothing else: no enrolment, no bonding, no write
   that changes the sensor
 - pressure arrives in its own encoding, so check it against a gauge
