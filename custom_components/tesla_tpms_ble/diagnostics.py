@@ -19,6 +19,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from .connection import TeslaTpmsConnection
 from .const import (
@@ -85,9 +86,19 @@ async def async_get_config_entry_diagnostics(
         )
         return diagnostics
 
+    # Named for what it is. It used to be called last_decoded_advertisement,
+    # which was wrong as soon as the connection path existed: a GATT reading
+    # moves the same timestamp, so a sensor that had not advertised for hours
+    # still showed a time from minutes ago. For advertisements alone, read
+    # payload_history below -- every entry there carries its own last_seen.
     last_update = data.last_update_time
-    diagnostics["last_decoded_advertisement"] = (
+    diagnostics["last_decoded_reading"] = (
         last_update.isoformat() if last_update else None
+    )
+    diagnostics["seconds_since_last_reading"] = (
+        round((dt_util.utcnow() - last_update).total_seconds())
+        if last_update
+        else None
     )
     diagnostics["payload_history"] = data.history.as_dict()
 

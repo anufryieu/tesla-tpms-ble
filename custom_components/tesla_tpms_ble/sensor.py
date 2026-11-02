@@ -50,6 +50,12 @@ SENSOR_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         suggested_display_precision=1,
     ),
+    # Not diagnostic: it belongs beside the pressure it dates, because the
+    # pressure is what someone reads off the card and believes.
+    TPMSSensor.LAST_READING: SensorEntityDescription(
+        key=TPMSSensor.LAST_READING,
+        device_class=SensorDeviceClass.TIMESTAMP,
+    ),
     TPMSSensor.BATTERY: SensorEntityDescription(
         key=TPMSSensor.BATTERY,
         device_class=SensorDeviceClass.BATTERY,
@@ -161,6 +167,12 @@ class TeslaTPMSSensorEntity(PassiveBluetoothProcessorEntity, SensorEntity):
         TPMS sensors sleep when the wheel is not turning, so going quiet is
         normal and must not mark the entity unavailable -- that would lose the
         last known pressure every time the car is parked.
+
+        The cost of that choice is a stale reading shown as if it were current,
+        so the age is published as its own ``Last reading`` entity.
+        ``assumed_state`` below is not enough on its own: it reaches the state
+        attributes, but Home Assistant only draws it for entities you can
+        operate, so on a sensor's card nothing about it is visible.
         """
         return True
 

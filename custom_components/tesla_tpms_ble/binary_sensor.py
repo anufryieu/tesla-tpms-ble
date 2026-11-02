@@ -93,7 +93,13 @@ class TeslaTPMSBinarySensorEntity(
 
     @property
     def available(self) -> bool:
-        """Return True once the sensor has ever been seen."""
+        """Return True once the sensor has ever been seen.
+
+        As for the sensors: a sleeping TPMS is normal, not unavailable. ``Awake``
+        is told that it has gone quiet from the integration's own clock, because
+        nothing arrives from a sleeping sensor to say so -- see
+        ``TeslaTPMSBluetoothDeviceData.update_quiet``.
+        """
         return True
 
     @property
