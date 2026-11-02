@@ -16,14 +16,19 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import CoreState, HomeAssistant, callback
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.util import dt as dt_util
 
 from .connection import TeslaTpmsConnection
 from .const import (
+    AWAKE_TIMEOUT,
     CONF_CONNECT,
     CONF_PRESSURE_TRIM,
     CONF_PROFILE,
     CONF_TEMPERATURE_TRIM,
+    CONNECT_ATTEMPTS,
+    CONNECT_IDLE_POLL_INTERVAL,
     CONNECT_POLL_INTERVAL,
+    CONNECT_QUIET_ATTEMPTS,
     DEFAULT_CONNECT,
     DEFAULT_PRESSURE_TRIM,
     DEFAULT_PROFILE,
@@ -85,6 +90,33 @@ class TeslaTpmsCoordinator(ActiveBluetoothProcessorCoordinator):
         self._debounced_poll.async_schedule_call()
 
 
+def poll_decision(
+    *,
+    silent_for: float,
+    connected: bool,
+    seconds_since_attempt: float | None,
+) -> tuple[bool, bool]:
+    """Return whether the sensor has gone quiet, and whether a poll is due.
+
+    Split out of the timer callback so the rule can be tested without a live
+    Home Assistant. Two things are decided here:
+
+    *quiet* -- the sensor has said nothing for ``AWAKE_TIMEOUT`` and we are not
+    holding a connection to it. That is as close as this integration gets to
+    knowing the wheel has stopped, and it is the only thing that can clear
+    ``Awake``: a GATT reading is awake by definition and a sleeping sensor
+    sends nothing at all.
+
+    *due* -- enough time has passed since the last attempt. A quiet sensor gets
+    the long interval, because every attempt against a sleeping sensor is a
+    connection that can only fail.
+    """
+    quiet = silent_for >= AWAKE_TIMEOUT and not connected
+    interval = CONNECT_IDLE_POLL_INTERVAL if quiet else CONNECT_POLL_INTERVAL
+    due = seconds_since_attempt is None or seconds_since_attempt >= interval
+    return quiet, due
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a Tesla / Autel BLE TPMS sensor from a config entry."""
     address = entry.unique_id
@@ -113,6 +145,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     connection = TeslaTpmsConnection()
     hass.data[DOMAIN][f"{entry.entry_id}_connection"] = connection
 
+    # The timer below ticks at CONNECT_POLL_INTERVAL, but only polls that often
+    # while the sensor is still talking; see _async_timed_poll. Setup time is
+    # the starting point for "how long has it been quiet", so a sensor that has
+    # never answered is treated as quiet rather than polled flat out forever.
+    setup_time = dt_util.utcnow()
+    last_attempt: datetime | None = None
+    quiet = False
+
     def _needs_poll(
         service_info: BluetoothServiceInfoBleak, last_poll: float | None
     ) -> bool:
@@ -125,7 +165,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return last_poll is None or last_poll >= CONNECT_POLL_INTERVAL
 
     async def _poll(service_info: BluetoothServiceInfoBleak):
-        reading = await connection.async_poll(hass, service_info)
+        # Judged here rather than taken from the timer: a sensor that has just
+        # started turning is heard first by the advertisement path, which polls
+        # straight away, and that poll deserves the full set of attempts.
+        silent_for = (
+            dt_util.utcnow() - (data.last_update_time or setup_time)
+        ).total_seconds()
+        attempts = (
+            CONNECT_QUIET_ATTEMPTS if silent_for >= AWAKE_TIMEOUT else CONNECT_ATTEMPTS
+        )
+        reading = await connection.async_poll(
+            hass, service_info, max_attempts=attempts
+        )
         return data.update_from_connection(reading, service_info)
 
     coordinator = hass.data[DOMAIN][entry.entry_id] = TeslaTpmsCoordinator(
@@ -140,8 +191,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     @callback
-    def _async_timed_poll(_now: datetime) -> None:
+    def _async_timed_poll(now: datetime) -> None:
         """Ask for a reading on our own clock. See :class:`TeslaTpmsCoordinator`."""
+        nonlocal last_attempt, quiet
+
         if not entry.options.get(CONF_CONNECT, DEFAULT_CONNECT):
             return
         if hass.state is not CoreState.running:
@@ -149,9 +202,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not coordinator.has_service_info:
             # Never heard from this sensor, so there is no address to connect to.
             return
+
+        # Waking is never missed by backing off: a sensor that starts turning
+        # advertises again, and the first advertisement after an absence is one
+        # Home Assistant does forward, which polls through the usual path.
+        silent_for = (now - (data.last_update_time or setup_time)).total_seconds()
+        now_quiet, due = poll_decision(
+            silent_for=silent_for,
+            connected=connection.connected,
+            seconds_since_attempt=(
+                None if last_attempt is None else (now - last_attempt).total_seconds()
+            ),
+        )
+        if now_quiet != quiet:
+            quiet = now_quiet
+            if now_quiet:
+                _LOGGER.debug(
+                    "%s: silent for %.0f s, reporting it asleep", address, silent_for
+                )
+                coordinator.async_push_update(data.update_quiet())
+        if not due:
+            return
+
         if connection.connected:
             # A connected sensor stops advertising, so it will look absent to
             # the check below. Having the connection is the better evidence.
+            last_attempt = now
             coordinator.async_request_poll()
             return
         if not async_address_present(hass, address, connectable=True):
@@ -160,6 +236,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # passive-only proxy looks exactly like this and never recovers.
             _LOGGER.debug("%s: no connectable path in range, skipping poll", address)
             return
+        last_attempt = now
         coordinator.async_request_poll()
 
     @callback

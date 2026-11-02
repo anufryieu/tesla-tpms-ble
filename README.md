@@ -137,6 +137,7 @@ Per sensor:
 | Temperature | — | °C |
 | Battery | diagnostic | % from a lithium discharge curve; coarse by nature |
 | Voltage | diagnostic | cell volts, the honest version of the above |
+| Last reading | — | when the pressure above was measured |
 | Awake | diagnostic | false while the sensor is in its low duty-cycle mode |
 | Signal strength | diagnostic | disabled by default |
 | Raw pressure / Raw temperature / Status | diagnostic | disabled by default; for [calibration](docs/CALIBRATION.md) |
@@ -144,6 +145,14 @@ Per sensor:
 Entities stay available when a sensor goes quiet, and are marked
 `assumed_state`. This is deliberate — a parked car stops transmitting, and you
 want yesterday's pressure rather than `unavailable` on your dashboard.
+
+The price of that is a reading from yesterday looking exactly like one from a
+minute ago, and `assumed_state` does not help: it reaches the state attributes,
+but Home Assistant only draws it for entities you can operate, never for a
+sensor. **Last reading** is there to say so out loud, next to the pressure it
+dates. `Awake` is cleared from the integration's own clock for the same reason —
+a sleeping sensor sends nothing at all, so without that it could only ever go on
+and stay on.
 
 While a sensor is asleep it publishes **no** pressure or temperature. Sleep
 frames do not refresh those bytes, so decoding them would give you a confident,
@@ -166,7 +175,14 @@ experimental and off by default:
   active connections enabled; a passive-only proxy cannot open a connection
 - it polls on its own 30-second timer (`CONNECT_POLL_INTERVAL` in `const.py`),
   and keeps the connection open between polls so a sensor that volunteers a
-  reading is heard at once
+  reading is heard at once — measured on four sensors, one arrives unasked
+  about every 28 seconds, and a poll that lands inside that window skips the
+  request entirely
+- once a sensor has been silent for `AWAKE_TIMEOUT` it is treated as asleep and
+  tried only every `CONNECT_IDLE_POLL_INTERVAL` (five minutes), with fewer
+  connection attempts. A parked wheel answers nothing, so the short clock only
+  buys failed connections; waking is still caught at once, because a sensor that
+  starts turning advertises again and that advertisement drives a poll
 - each sensor therefore holds one of that adapter's or proxy's connection slots
   while it is in range — four wheels take four slots
 - it asks for a measurement and nothing else: no enrolment, no bonding, no write

@@ -162,6 +162,12 @@ The sensor is asleep. Look at the `Awake` diagnostic entity. Sleep frames do not
 refresh those bytes, so the integration deliberately publishes nothing rather
 than a stale reading.
 
+**Pressure is there, but is it current?**
+Look at `Last reading`. The entities keep their last values through a sleep on
+purpose, so an hours-old pressure looks exactly like a fresh one; that entity is
+the only thing on the page that says which it is. `Awake` answers the same
+question the other way round.
+
 To find out whether it is *ever* awake, download this integration's diagnostics:
 the device page → **⋮ → Download diagnostics**. Under `payload_history` you get
 every distinct payload the sensor has sent since Home Assistant started, with
@@ -236,9 +242,19 @@ This is **experimental and off by default**:
   `0213` while it is idle, so a sensor that volunteers readings is heard at
   once rather than at the next tick. `connection.pushed_count` in the
   diagnostics counts those; if it stays at zero, that sensor only ever answers.
+  On the four sensors measured here it does not stay at zero: one unasked
+  reading arrives roughly every 28 seconds, and a poll inside that window
+  returns it instead of writing a request of its own.
 - Each sensor therefore holds one of the adapter's or proxy's BLE connection
   slots for as long as it is in range. Four wheels take four slots, so check
   what else that adapter is expected to connect to.
+- **While the sensor is quiet the poll backs off.** After `AWAKE_TIMEOUT`
+  without a reading it is treated as asleep: `Awake` goes off, and the poll
+  drops to `CONNECT_IDLE_POLL_INTERVAL` (five minutes) with fewer connection
+  attempts. A parked wheel answers nothing, so the short clock only produces
+  `Failed to connect after N attempt(s)` in the log, around the clock. Nothing
+  is lost by waiting: a sensor that starts turning advertises again, and that
+  advertisement drives a poll immediately.
 - Thirty seconds suits a drive; raise `CONNECT_POLL_INTERVAL` in `const.py` if
   you would rather spend less of the sensor's battery.
 
