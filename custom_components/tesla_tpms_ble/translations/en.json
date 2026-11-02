@@ -34,5 +34,34 @@
         }
       }
     }
+  },
+  "selector": {
+    "profile": {
+      "options": {
+        "default": "Default — absolute kPa and °C",
+        "legacy": "Legacy — the published ESP32 fit"
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "awake": {
+        "name": "Awake"
+      }
+    },
+    "sensor": {
+      "last_reading": {
+        "name": "Last reading"
+      },
+      "raw_pressure": {
+        "name": "Raw pressure"
+      },
+      "raw_temperature": {
+        "name": "Raw temperature"
+      },
+      "status": {
+        "name": "Status"
+      }
+    }
   }
 }

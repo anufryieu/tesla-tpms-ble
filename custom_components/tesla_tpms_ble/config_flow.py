@@ -11,11 +11,16 @@ from homeassistant.components.bluetooth import (
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
+    ConfigFlowResult,
     OptionsFlow,
 )
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .const import (
     CONF_CONNECT,
@@ -45,7 +50,7 @@ class TeslaTPMSConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Handle a sensor discovered by the Bluetooth integration."""
         await self.async_set_unique_id(discovery_info.address)
         self._abort_if_unique_id_configured()
@@ -58,7 +63,7 @@ class TeslaTPMSConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_bluetooth_confirm(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Confirm a discovered sensor."""
         assert self._discovered_device is not None
         assert self._discovery_info is not None
@@ -78,7 +83,7 @@ class TeslaTPMSConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Let the user pick from the sensors already seen."""
         if user_input is not None:
             address = user_input[CONF_ADDRESS]
@@ -121,7 +126,7 @@ class TeslaTPMSOptionsFlow(OptionsFlow):
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Manage the options."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
@@ -134,7 +139,13 @@ class TeslaTPMSOptionsFlow(OptionsFlow):
                     vol.Required(
                         CONF_PROFILE,
                         default=options.get(CONF_PROFILE, DEFAULT_PROFILE),
-                    ): vol.In(sorted(PROFILES)),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=sorted(PROFILES),
+                            translation_key="profile",
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Optional(
                         CONF_PRESSURE_TRIM,
                         default=options.get(
