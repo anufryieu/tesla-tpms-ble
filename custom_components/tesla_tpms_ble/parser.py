@@ -76,8 +76,8 @@ class PayloadHistory:
     Keeping one entry per distinct payload, with counts and timestamps,
     survives that transition -- a single awake frame during a drive is still
     listed hours later. ``max_payload_len`` is the field that answers the
-    question this was written for: anything above
-    :data:`~.decoder.MIN_PAYLOAD_LEN` means a real reading reached us.
+    question this was written for: anything at
+    :data:`~.decoder.MIN_PAYLOAD_LEN` or above means a real reading reached us.
 
     Home Assistant does not forward every radio frame. It drops an
     advertisement identical to the previous one from the same device, so a
@@ -167,7 +167,7 @@ class PayloadHistory:
 
     @property
     def max_payload_len(self) -> int:
-        """Longest payload seen. Above ``MIN_PAYLOAD_LEN`` means a reading."""
+        """Longest payload seen. ``MIN_PAYLOAD_LEN`` or more means a reading."""
         return max(
             (len(p) for p in self._entries if isinstance(p, bytes)), default=0
         )
@@ -212,6 +212,9 @@ class TPMSSensor(StrEnum):
     BATTERY = "battery"
     VOLTAGE = "voltage"
     SIGNAL_STRENGTH = "signal_strength"
+    # When the values above were measured. The entities keep their last reading
+    # through a sleep, so their age is the thing a person actually needs.
+    LAST_READING = "last_reading"
     # Diagnostics -- the raw wire values, so the decode can be verified
     # against a reference gauge without a packet capture.
     RAW_PRESSURE = "raw_pressure"
@@ -249,8 +252,43 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
 
     @property
     def last_update_time(self) -> datetime | None:
-        """Timestamp of the most recent decoded advertisement."""
+        """Timestamp of the most recent decoded reading, from either path."""
         return self._last_update_time
+
+    def _publish_last_reading(self) -> None:
+        """Expose when the values on show were actually measured.
+
+        The entities deliberately keep their last reading while the sensor
+        sleeps -- losing the pressure every time the car is parked would be
+        worse than showing an old one. That makes the *age* of the reading the
+        thing a person needs, and nothing else on the device page carries it:
+        ``assumed_state`` is set on every entity once the sensor goes quiet, but
+        Home Assistant only renders that for things you can operate, never for a
+        sensor, so it never reaches the screen.
+        """
+        self.update_sensor(
+            key=str(TPMSSensor.LAST_READING),
+            native_unit_of_measurement=None,
+            native_value=self._last_update_time,
+            name="Last reading",
+        )
+
+    def update_quiet(self) -> SensorUpdate:
+        """Report the sensor as no longer awake, keeping its last reading.
+
+        Neither path can clear ``Awake`` on its own: a reading fetched over GATT
+        is awake by definition, and a sleeping sensor sends no reply and no
+        advertisement to say otherwise. So the caller watches the clock and
+        publishes this once the sensor has stopped talking. The measurements are
+        left exactly as they were -- their age is on show as ``Last reading``.
+        """
+        self._events_updates.clear()
+        self.update_binary_sensor(
+            key=str(TPMSBinarySensor.AWAKE),
+            native_value=False,
+            name="Awake",
+        )
+        return self._finish_update()
 
     def set_profile(
         self,
@@ -342,6 +380,7 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
             native_value=reading.status,
             name="Status",
         )
+        self._publish_last_reading()
 
         if reading.pressure_bar is not None:
             self.update_sensor(
@@ -399,6 +438,7 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
         advertisement-only byte) is left untouched.
         """
         self._events_updates.clear()
+        self._last_update_time = datetime.now(timezone.utc)
         address = service_info.address
         name = f"TPMS {short_address(address)}"
         self.set_device_manufacturer("Tesla / Autel (BLE TPMS)")
@@ -411,6 +451,7 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
             native_value=True,
             name="Awake",
         )
+        self._publish_last_reading()
         if reading.pressure_bar is not None:
             self.update_sensor(
                 key=str(TPMSSensor.PRESSURE),
@@ -440,6 +481,5 @@ class TeslaTPMSBluetoothDeviceData(BluetoothData):
                     name="Raw temperature",
                 )
 
-        self._last_update_time = datetime.now(timezone.utc)
         self.update_signal_strength(service_info.rssi)
         return self._finish_update()

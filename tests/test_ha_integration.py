@@ -1,28 +1,36 @@
 """End-to-end tests through the real Home Assistant parser pipeline.
 
-Skipped automatically if Home Assistant is not installed, so the pure decoder
-tests still run anywhere.
+Skipped automatically if the Home Assistant Bluetooth stack is not installed,
+so the pure decoder tests still run anywhere.
 """
 import asyncio
+import importlib
 import json
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-ha = pytest.importorskip("homeassistant.const")
-bsd = pytest.importorskip("bluetooth_sensor_state_data")
+# Skip on what the integration actually imports. `homeassistant.const` is
+# satisfied by a bare `pip install homeassistant`, but the package __init__
+# imports homeassistant.components.bluetooth, which pulls in the usb
+# integration and its requirements -- those ship with Home Assistant the
+# application, not with the homeassistant wheel. Guarding on const alone turned
+# a partial install into a collection error instead of a skip.
+pytest.importorskip("homeassistant.components.bluetooth")
+pytest.importorskip("bluetooth_sensor_state_data")
 
-from home_assistant_bluetooth import BluetoothServiceInfo  # noqa: E402
+from home_assistant_bluetooth import BluetoothServiceInfo
 
-from custom_components.tesla_tpms_ble.parser import (  # noqa: E402
+from custom_components.tesla_tpms_ble.parser import (
     TeslaTPMSBluetoothDeviceData,
     TPMSBinarySensor,
     TPMSSensor,
 )
-from custom_components.tesla_tpms_ble.decoder import (  # noqa: E402
+from custom_components.tesla_tpms_ble.decoder import (
     PROFILE_LEGACY,
     TESLA_COMPANY_ID,
 )
@@ -149,7 +157,11 @@ class TestParserPipeline:
             service_info(REAL_SLEEP_FRAME, name="tsTPMS ")
         )
         v = values(update)
-        assert set(v) == {TPMSSensor.STATUS, TPMSSensor.SIGNAL_STRENGTH}
+        assert set(v) == {
+            TPMSSensor.STATUS,
+            TPMSSensor.SIGNAL_STRENGTH,
+            TPMSSensor.LAST_READING,
+        }
         assert v[TPMSSensor.STATUS] == 0x03
         assert binary_values(update) == {TPMSBinarySensor.AWAKE: False}
 
@@ -433,6 +445,55 @@ class TestConnectionUpdate:
         assert v[TPMSSensor.TEMPERATURE] == pytest.approx(17.0)
 
 
+class TestGoingQuiet:
+    """Awake has to be cleared by the clock, because nothing announces sleep.
+
+    A reading fetched over GATT is awake by definition and a sleeping sensor
+    sends neither a reply nor an advertisement, so Awake could only ever go up.
+    Measured on a parked vehicle: it stayed on for eighteen hours after the last
+    reading, beside a pressure that was just as old and looked current.
+    """
+
+    REAL_REPLY = bytes.fromhex("1208e20105088f041026")
+
+    def _reading_update(self):
+        from custom_components.tesla_tpms_ble.decoder import decode_tpdata
+
+        data = TeslaTPMSBluetoothDeviceData()
+        update = data.update_from_connection(
+            decode_tpdata(self.REAL_REPLY), service_info(b"\x01")
+        )
+        return data, update
+
+    def test_update_quiet_clears_awake(self):
+        data, _ = self._reading_update()
+        assert binary_values(data.update_quiet())[TPMSBinarySensor.AWAKE] is False
+
+    def test_update_quiet_keeps_the_last_measurements(self):
+        data, _ = self._reading_update()
+        v = values(data.update_quiet())
+        # Losing the pressure every time the car is parked would be worse than
+        # showing an old one, so the age is published beside it instead.
+        assert v[TPMSSensor.PRESSURE] == pytest.approx(4.26, abs=0.01)
+
+    def test_last_reading_dates_a_connection_update(self):
+        data, update = self._reading_update()
+        assert values(update)[TPMSSensor.LAST_READING] == data.last_update_time
+
+    def test_last_reading_dates_an_advertisement(self):
+        data = TeslaTPMSBluetoothDeviceData()
+        update = data.update(service_info(payload()))
+        assert values(update)[TPMSSensor.LAST_READING] == data.last_update_time
+
+    def test_going_quiet_does_not_refresh_the_reading_timestamp(self):
+        data, _ = self._reading_update()
+        taken_at = data.last_update_time
+        data.update_quiet()
+        # The whole point of the entity is the age of the measurement; saying
+        # the sensor has gone to sleep must not make the reading look fresh.
+        assert data.last_update_time == taken_at
+
+
 class _FakeChar:
     def __init__(self, props):
         self.properties = props
@@ -561,6 +622,89 @@ class TestTimedPoll:
 
         assert CONNECT_POLL_INTERVAL == 30.0
 
+    def test_a_quiet_sensor_is_polled_far_less_often(self):
+        from custom_components.tesla_tpms_ble.const import (
+            AWAKE_TIMEOUT,
+            CONNECT_IDLE_POLL_INTERVAL,
+            CONNECT_POLL_INTERVAL,
+        )
+
+        # A sleeping sensor answers nothing, so the 30-second clock only buys
+        # failed connection attempts -- measured in the field as nine of them
+        # every half minute, around the clock, on a parked vehicle.
+        assert CONNECT_IDLE_POLL_INTERVAL > CONNECT_POLL_INTERVAL
+        # And the timeout has to outlast one interval, so that a single dropped
+        # connection does not flap Awake off and straight back on.
+        assert AWAKE_TIMEOUT > CONNECT_POLL_INTERVAL
+
+    def test_a_quiet_sensor_gets_fewer_connection_attempts(self):
+        from custom_components.tesla_tpms_ble.const import (
+            CONNECT_ATTEMPTS,
+            CONNECT_QUIET_ATTEMPTS,
+        )
+
+        # Retrying is right for a device that is there and busy, and pointless
+        # for one that is asleep and will not answer any of the attempts.
+        assert CONNECT_QUIET_ATTEMPTS < CONNECT_ATTEMPTS
+
+    def test_first_tick_always_polls(self):
+        from custom_components.tesla_tpms_ble import poll_decision
+
+        _, due = poll_decision(
+            silent_for=0.0, connected=False, seconds_since_attempt=None
+        )
+        assert due is True
+
+    def test_a_talking_sensor_polls_on_the_short_interval(self):
+        from custom_components.tesla_tpms_ble import poll_decision
+        from custom_components.tesla_tpms_ble.const import CONNECT_POLL_INTERVAL
+
+        quiet, due = poll_decision(
+            silent_for=1.0,
+            connected=True,
+            seconds_since_attempt=CONNECT_POLL_INTERVAL,
+        )
+        assert quiet is False
+        assert due is True
+
+    def test_a_held_connection_counts_as_awake(self):
+        from custom_components.tesla_tpms_ble import poll_decision
+        from custom_components.tesla_tpms_ble.const import AWAKE_TIMEOUT
+
+        # Silent, but the link is still open -- evidence of life that the
+        # clock on its own does not have.
+        quiet, _ = poll_decision(
+            silent_for=AWAKE_TIMEOUT * 10,
+            connected=True,
+            seconds_since_attempt=None,
+        )
+        assert quiet is False
+
+    def test_a_parked_sensor_goes_quiet_and_backs_off(self):
+        from custom_components.tesla_tpms_ble import poll_decision
+        from custom_components.tesla_tpms_ble.const import (
+            CONNECT_IDLE_POLL_INTERVAL,
+            CONNECT_POLL_INTERVAL,
+        )
+
+        # The measured case: parked overnight, nothing heard for eighteen
+        # hours, no connection held. Awake stayed on through all of it.
+        silent_for = 18 * 60 * 60
+        quiet, due = poll_decision(
+            silent_for=silent_for,
+            connected=False,
+            seconds_since_attempt=CONNECT_POLL_INTERVAL,
+        )
+        assert quiet is True
+        # Half a minute since the last attempt is no longer reason enough.
+        assert due is False
+        _, due = poll_decision(
+            silent_for=silent_for,
+            connected=False,
+            seconds_since_attempt=CONNECT_IDLE_POLL_INTERVAL,
+        )
+        assert due is True
+
     def test_no_poll_before_the_sensor_has_ever_been_heard(self):
         # Nothing to connect to yet, so the timer must leave it alone.
         assert self._coordinator().has_service_info is False
@@ -609,14 +753,26 @@ class TestHeldConnection:
         assert conn.pushed_count == 0
 
     def test_poll_returns_a_push_without_connecting(self):
-        # With nobody listening yet, a push is kept for the next poll, which
-        # must then not touch Bluetooth at all -- hence the None arguments.
+        # A reading the sensor volunteered is answer enough, so the poll must
+        # not touch Bluetooth at all -- hence the None arguments.
         conn = self._conn()
         conn._on_push(0, bytearray(self.REAL_REPLY))
         reading = asyncio.run(conn.async_poll(None, None))
         assert reading.pressure_bar == pytest.approx(4.26, abs=0.01)
-        # Consumed: a second poll would have to ask for itself.
-        assert conn._pushed is None
+        # Not consumed: measured on four sensors, one of these arrives every
+        # 28 s, so the reading stays the answer until it ages out and a second
+        # poll inside the window skips the write as well.
+        assert asyncio.run(conn.async_poll(None, None)) is reading
+
+    def test_a_push_older_than_one_interval_does_not_answer_a_poll(self):
+        from custom_components.tesla_tpms_ble.const import CONNECT_POLL_INTERVAL
+
+        conn = self._conn()
+        conn._on_push(0, bytearray(self.REAL_REPLY))
+        conn._last_push_at -= CONNECT_POLL_INTERVAL
+        # Stale: the sensor has to be asked again rather than answered from
+        # memory, or a sensor that stopped pushing would never be noticed.
+        assert conn._recent_push() is None
 
     def test_disconnect_clears_the_held_client(self):
         conn = self._conn()
@@ -674,17 +830,92 @@ class TestEntityNamingAndIcons:
                     f"{description.translation_key!r} with no name behind it"
                 )
 
+    # A device class already supplies a translated name, so a key on top of one
+    # is normally redundant. These two keep theirs because the device class
+    # name is wrong for them, not merely unnecessary.
+    CLASSED_BUT_RENAMED: ClassVar[dict[tuple[str, str], str]] = {
+        ("binary_sensor", "awake"): 'the class would call it "Running"',
+        ("sensor", "last_reading"): 'the class would call it "Timestamp"',
+    }
+
+    # Home Assistant writes entity names in sentence case; the parser's one
+    # title-cased name loses its capital when the device class takes over.
+    SENTENCE_CASED: ClassVar[set[tuple[str, str]]] = {("sensor", "signal_strength")}
+
     def test_no_redundant_translation_keys(self):
-        # A device class already supplies a translated name, so a key on top of
-        # one is redundant -- core's pylint plugin flags exactly this. The
-        # Awake binary sensor is the deliberate exception: "Running" is the
-        # device class name, and it says less here.
         for platform, descriptions in self._descriptions().items():
             for key, description in descriptions.items():
-                if platform == "binary_sensor" and key == "awake":
+                if (platform, key) in self.CLASSED_BUT_RENAMED:
                     continue
                 assert not (description.device_class and description.translation_key), (
                     f"{platform}.{key} has both a device class and a key"
+                )
+
+    def test_renamed_entities_really_do_differ_from_their_device_class(self):
+        # The exemption above is not a free pass: each one has to be earned by
+        # the device class name actually being wrong.
+        strings = self._json("strings.json")["entity"]
+        for (platform, key), reason in self.CLASSED_BUT_RENAMED.items():
+            description = self._descriptions()[platform][key]
+            class_name = self._device_class_names(platform)[
+                str(description.device_class)
+            ]
+            ours = strings[platform][str(description.translation_key)]["name"]
+            assert ours != class_name, (
+                f"{platform}.{key} is exempt because {reason}, but the class "
+                f"now names it {class_name!r} too -- drop the translation key"
+            )
+
+    @staticmethod
+    def _device_class_names(platform):
+        """What Home Assistant itself names each device class on ``platform``."""
+        module = importlib.import_module(f"homeassistant.components.{platform}")
+        path = Path(module.__file__).parent / "strings.json"
+        component = json.loads(path.read_text())["entity_component"]
+        return {
+            device_class: entry["name"]
+            for device_class, entry in component.items()
+            if device_class != "_" and "name" in entry
+        }
+
+    def test_entities_render_under_the_name_the_parser_intends(self):
+        """Dropping ``entity_names`` must not quietly rename anything.
+
+        The parser still passes a ``name=`` for every value it publishes, and
+        those strings are what shipped before this became the device class's
+        job. Each one now has to be reproduced by either the device class or a
+        translation key -- otherwise adding a classed entity silently renames
+        it, which is exactly what ``last_reading`` did: a timestamp device
+        class with no key of its own would have put "Timestamp" on the card.
+        """
+        strings = self._json("strings.json")["entity"]
+        data = TeslaTPMSBluetoothDeviceData()
+        intended = {
+            device_key.key: value.name
+            for update in (data.update(service_info(payload())), data.update_quiet())
+            for values in (update.entity_values, update.binary_entity_values)
+            for device_key, value in values.items()
+        }
+        assert intended, "the parser published nothing to check"
+
+        for platform, descriptions in self._descriptions().items():
+            for key, description in descriptions.items():
+                if key not in intended:
+                    continue
+                if description.translation_key:
+                    renders_as = strings[platform][str(description.translation_key)][
+                        "name"
+                    ]
+                else:
+                    renders_as = self._device_class_names(platform)[
+                        str(description.device_class)
+                    ]
+                if (platform, key) in self.SENTENCE_CASED:
+                    assert renders_as == intended[key].capitalize()
+                    continue
+                assert renders_as == intended[key], (
+                    f"{platform}.{key} used to show as {intended[key]!r} and "
+                    f"now shows as {renders_as!r}"
                 )
 
     def test_icons_are_declared_in_icons_json_not_in_python(self):

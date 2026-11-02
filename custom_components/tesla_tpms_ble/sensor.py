@@ -55,6 +55,18 @@ SENSOR_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         suggested_display_precision=1,
     ),
+    # Not diagnostic: it belongs beside the pressure it dates, because the
+    # pressure is what someone reads off the card and believes.
+    #
+    # The one classed sensor that still needs a translation key: the timestamp
+    # device class would name it "Timestamp", which says nothing about which
+    # time this is. The key names it; the class still gives it the right state
+    # type and formatting.
+    TPMSSensor.LAST_READING: SensorEntityDescription(
+        key=TPMSSensor.LAST_READING,
+        translation_key=TPMSSensor.LAST_READING,
+        device_class=SensorDeviceClass.TIMESTAMP,
+    ),
     TPMSSensor.BATTERY: SensorEntityDescription(
         key=TPMSSensor.BATTERY,
         device_class=SensorDeviceClass.BATTERY,

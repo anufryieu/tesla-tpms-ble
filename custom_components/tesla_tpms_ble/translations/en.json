@@ -50,6 +50,9 @@
       }
     },
     "sensor": {
+      "last_reading": {
+        "name": "Last reading"
+      },
       "raw_pressure": {
         "name": "Raw pressure"
       },

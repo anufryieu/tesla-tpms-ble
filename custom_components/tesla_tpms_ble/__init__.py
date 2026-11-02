@@ -12,14 +12,18 @@ from homeassistant.components.bluetooth import (
 from homeassistant.const import Platform
 from homeassistant.core import CoreState, HomeAssistant, callback
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.util import dt as dt_util
 
 from .connection import TeslaTpmsConnection
 from .const import (
+    AWAKE_TIMEOUT,
     CONF_CONNECT,
     CONF_PRESSURE_TRIM,
     CONF_PROFILE,
     CONF_TEMPERATURE_TRIM,
+    CONNECT_ATTEMPTS,
     CONNECT_POLL_INTERVAL,
+    CONNECT_QUIET_ATTEMPTS,
     DEFAULT_CONNECT,
     DEFAULT_PRESSURE_TRIM,
     DEFAULT_PROFILE,
@@ -31,6 +35,7 @@ from .coordinator import (
     TeslaTpmsConfigEntry,
     TeslaTpmsCoordinator,
     TeslaTpmsRuntimeData,
+    poll_decision,
 )
 from .decoder import PROFILE_DEFAULT, PROFILES
 from .parser import TeslaTPMSBluetoothDeviceData
@@ -69,6 +74,14 @@ async def async_setup_entry(
 
     connection = TeslaTpmsConnection()
 
+    # The timer below ticks at CONNECT_POLL_INTERVAL, but only polls that often
+    # while the sensor is still talking; see _async_timed_poll. Setup time is
+    # the starting point for "how long has it been quiet", so a sensor that has
+    # never answered is treated as quiet rather than polled flat out forever.
+    setup_time = dt_util.utcnow()
+    last_attempt: datetime | None = None
+    quiet = False
+
     def _needs_poll(
         service_info: BluetoothServiceInfoBleak, last_poll: float | None
     ) -> bool:
@@ -81,7 +94,18 @@ async def async_setup_entry(
         return last_poll is None or last_poll >= CONNECT_POLL_INTERVAL
 
     async def _poll(service_info: BluetoothServiceInfoBleak):
-        reading = await connection.async_poll(hass, service_info)
+        # Judged here rather than taken from the timer: a sensor that has just
+        # started turning is heard first by the advertisement path, which polls
+        # straight away, and that poll deserves the full set of attempts.
+        silent_for = (
+            dt_util.utcnow() - (data.last_update_time or setup_time)
+        ).total_seconds()
+        attempts = (
+            CONNECT_QUIET_ATTEMPTS if silent_for >= AWAKE_TIMEOUT else CONNECT_ATTEMPTS
+        )
+        reading = await connection.async_poll(
+            hass, service_info, max_attempts=attempts
+        )
         return data.update_from_connection(reading, service_info)
 
     coordinator = TeslaTpmsCoordinator(
@@ -99,8 +123,10 @@ async def async_setup_entry(
     )
 
     @callback
-    def _async_timed_poll(_now: datetime) -> None:
+    def _async_timed_poll(now: datetime) -> None:
         """Ask for a reading on our own clock. See :class:`TeslaTpmsCoordinator`."""
+        nonlocal last_attempt, quiet
+
         if not entry.options.get(CONF_CONNECT, DEFAULT_CONNECT):
             return
         if hass.state is not CoreState.running:
@@ -108,9 +134,32 @@ async def async_setup_entry(
         if not coordinator.has_service_info:
             # Never heard from this sensor, so there is no address to connect to.
             return
+
+        # Waking is never missed by backing off: a sensor that starts turning
+        # advertises again, and the first advertisement after an absence is one
+        # Home Assistant does forward, which polls through the usual path.
+        silent_for = (now - (data.last_update_time or setup_time)).total_seconds()
+        now_quiet, due = poll_decision(
+            silent_for=silent_for,
+            connected=connection.connected,
+            seconds_since_attempt=(
+                None if last_attempt is None else (now - last_attempt).total_seconds()
+            ),
+        )
+        if now_quiet != quiet:
+            quiet = now_quiet
+            if now_quiet:
+                _LOGGER.debug(
+                    "%s: silent for %.0f s, reporting it asleep", address, silent_for
+                )
+                coordinator.async_push_update(data.update_quiet())
+        if not due:
+            return
+
         if connection.connected:
             # A connected sensor stops advertising, so it will look absent to
             # the check below. Having the connection is the better evidence.
+            last_attempt = now
             coordinator.async_request_poll()
             return
         if not async_address_present(hass, address, connectable=True):
@@ -119,6 +168,7 @@ async def async_setup_entry(
             # passive-only proxy looks exactly like this and never recovers.
             _LOGGER.debug("%s: no connectable path in range, skipping poll", address)
             return
+        last_attempt = now
         coordinator.async_request_poll()
 
     @callback

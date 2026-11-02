@@ -15,6 +15,16 @@ class TeslaTPMSEntity(PassiveBluetoothProcessorEntity):
     unavailable -- that would drop the last known pressure every time the car
     is parked, which is exactly when a dashboard is read. The reading is
     instead flagged ``assumed_state`` once the sensor stops broadcasting.
+
+    ``assumed_state`` is not enough on its own, which is why the age of the
+    reading is published as a ``Last reading`` entity of its own: the flag
+    reaches the state attributes, but Home Assistant only draws it for things
+    you can operate, so nothing about it shows on a sensor's card.
+
+    ``Awake`` is the one value no arriving message can clear -- a sleeping
+    sensor sends nothing to say it has stopped -- so it is told from the
+    integration's own clock instead; see
+    :meth:`~.parser.TeslaTPMSBluetoothDeviceData.update_quiet`.
     """
 
     @property

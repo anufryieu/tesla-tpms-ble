@@ -20,7 +20,9 @@ lives in :mod:`decoder` so it stays testable without Bluetooth.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import time
 from collections.abc import Callable
 from typing import Final
 
@@ -32,6 +34,7 @@ from homeassistant.components.bluetooth import (
 )
 from homeassistant.core import HomeAssistant
 
+from .const import CONNECT_ATTEMPTS, CONNECT_POLL_INTERVAL
 from .decoder import TeslaTpmsReading, build_tpdata_requests, decode_tpdata
 
 _LOGGER = logging.getLogger(__name__)
@@ -75,7 +78,12 @@ class TeslaTpmsConnection:
         self._on_reading = on_reading
         self._client: BleakClientWithServiceCache | None = None
         self._listening = False
-        self._pushed: TeslaTpmsReading | None = None
+        # The last reading the sensor volunteered, and when, on a monotonic
+        # clock. Measured on four sensors, one of these arrives every 28 s or
+        # so, which is less than the poll interval -- so a poll that lands
+        # inside that window has nothing to gain by writing a request.
+        self._last_push: TeslaTpmsReading | None = None
+        self._last_push_at: float = 0.0
         # Debugging surface for diagnostics: what the sensor last sent back and
         # why the last poll ended as it did. Populated on every poll attempt.
         self.last_replies: list[str] = []
@@ -106,26 +114,31 @@ class TeslaTpmsConnection:
         return self.last_replies[-1] if self.last_replies else None
 
     async def async_poll(
-        self, hass: HomeAssistant, service_info: BluetoothServiceInfoBleak
+        self,
+        hass: HomeAssistant,
+        service_info: BluetoothServiceInfoBleak,
+        max_attempts: int = CONNECT_ATTEMPTS,
     ) -> TeslaTpmsReading:
         """Return a reading, over a connection that is held open afterwards.
 
-        If the sensor pushed one since the last call, that is returned and
-        nothing is written. Otherwise it is asked, over the held connection if
-        there is one and a fresh one if not.
+        If the sensor volunteered one within the last interval, that is returned
+        and nothing is written. Otherwise it is asked, over the held connection
+        if there is one and a fresh one if not. ``max_attempts`` is lowered by
+        the caller for a sensor that has gone quiet, since a sleeping sensor
+        will not answer the retries either.
 
         Raises :class:`NoTPDataReply` if the sensor is reachable but says
         nothing decodable, or :class:`BleakError` if it cannot be connected --
         both of which the active coordinator treats as an ordinary failed poll.
         The failure reason is also kept in ``last_error`` for the diagnostics.
         """
-        if (pushed := self._pushed) is not None:
-            # The sensor spoke on its own since the last poll. Nothing to ask.
-            self._pushed = None
+        if (recent := self._recent_push()) is not None:
+            # The sensor spoke on its own a moment ago. Writing a request would
+            # buy the same measurement for the price of a round trip.
             self.last_error = None
-            return pushed
+            return recent
 
-        client = await self._async_client(hass, service_info)
+        client = await self._async_client(hass, service_info, max_attempts)
         # The request path installs its own handler on 0213, so stand down the
         # idle listener for the length of the exchange.
         await self._async_stop_listening()
@@ -142,7 +155,10 @@ class TeslaTpmsConnection:
         return reading
 
     async def _async_client(
-        self, hass: HomeAssistant, service_info: BluetoothServiceInfoBleak
+        self,
+        hass: HomeAssistant,
+        service_info: BluetoothServiceInfoBleak,
+        max_attempts: int = CONNECT_ATTEMPTS,
     ) -> BleakClientWithServiceCache:
         """Return the held connection, opening one if there is none."""
         if self.connected:
@@ -163,6 +179,7 @@ class TeslaTpmsConnection:
                 ble_device,
                 service_info.name or address,
                 disconnected_callback=self._on_disconnect,
+                max_attempts=max_attempts,
             )
         except BleakError as exc:
             self.last_error = f"connect failed: {exc}"
@@ -192,10 +209,21 @@ class TeslaTpmsConnection:
         if not self.connected:
             return
         assert self._client is not None
-        try:
+        # The link may have dropped already: handing the handle back is enough.
+        with contextlib.suppress(BleakError):
             await self._client.stop_notify(CHAR_INDICATE)
-        except BleakError:
-            pass
+
+    def _recent_push(self) -> TeslaTpmsReading | None:
+        """Return the volunteered reading, while it is newer than one interval.
+
+        Not consumed: a reading stays current until it ages out, so a poll that
+        arrives twice inside one window skips the write both times.
+        """
+        if self._last_push is None:
+            return None
+        if time.monotonic() - self._last_push_at >= CONNECT_POLL_INTERVAL:
+            return None
+        return self._last_push
 
     def _on_push(self, _handle: int, data: bytearray) -> None:
         """Handle an indication the sensor sent without being asked."""
@@ -206,11 +234,10 @@ class TeslaTpmsConnection:
             _LOGGER.debug("unsolicited indication, undecodable: %s", payload.hex())
             return
         self.pushed_count += 1
+        self._last_push = reading
+        self._last_push_at = time.monotonic()
         if self._on_reading is not None:
             self._on_reading(reading)
-        else:
-            # Nobody is listening yet; keep it for the next poll to return.
-            self._pushed = reading
 
     def _on_disconnect(self, _client: BleakClientWithServiceCache) -> None:
         """Note that the sensor hung up, so the next poll reconnects."""
@@ -269,10 +296,9 @@ class TeslaTpmsConnection:
                     )
                     break
         finally:
-            try:
+            # Already disconnecting, or never subscribed: nothing to salvage.
+            with contextlib.suppress(BleakError):
                 await client.stop_notify(CHAR_INDICATE)
-            except BleakError:
-                pass
 
         # Record what came back regardless of how it decodes, for diagnostics.
         self.last_replies = [b.hex() for b in got]

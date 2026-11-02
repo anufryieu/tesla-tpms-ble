@@ -27,6 +27,7 @@ from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_CONNECT,
@@ -53,6 +54,7 @@ async def async_get_config_entry_diagnostics(
     runtime = entry.runtime_data
     connection = runtime.connection
     data = runtime.data
+    last_update = data.last_update_time
 
     diagnostics: dict[str, Any] = {
         "address": entry.unique_id,
@@ -84,8 +86,19 @@ async def async_get_config_entry_diagnostics(
             "last_replies": connection.last_replies,
             "last_error": connection.last_error,
         },
-        "last_decoded_advertisement": (
-            data.last_update_time.isoformat() if data.last_update_time else None
+        # Named for what it is. It used to be called
+        # last_decoded_advertisement, which was wrong as soon as the connection
+        # path existed: a GATT reading moves the same timestamp, so a sensor
+        # that had not advertised for hours still showed a time from minutes
+        # ago. For advertisements alone, read payload_history -- every entry
+        # there carries its own last_seen.
+        "last_decoded_reading": (
+            last_update.isoformat() if last_update else None
+        ),
+        "seconds_since_last_reading": (
+            round((dt_util.utcnow() - last_update).total_seconds())
+            if last_update
+            else None
         ),
         "payload_history": data.history.as_dict(),
     }

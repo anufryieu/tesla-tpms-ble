@@ -1,12 +1,19 @@
 # Tesla / Autel BLE TPMS for Home Assistant
 
+[![CI](https://github.com/anufryieu/tesla-tpms-ble/actions/workflows/ci.yml/badge.svg)](https://github.com/anufryieu/tesla-tpms-ble/actions/workflows/ci.yml)
+[![HACS: custom](https://img.shields.io/badge/HACS-custom-41BDF5.svg)](https://hacs.xyz/docs/faq/custom_repositories)
+[![Home Assistant 2024.12+](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-41BDF5.svg)](https://www.home-assistant.io)
+
 A Home Assistant custom integration for tyre pressure sensors that speak the
 **Tesla BLE TPMS protocol** — including the **Autel MX-Sensor BLE**, the Tesla
 OEM sensor, and the various aftermarket clones sold as "BLE TPMS for Tesla".
 
-Pressure, temperature, battery and signal strength, over passive Bluetooth. No
-cloud, no pairing, no ESP32 required (though one helps if your HA box is far
+Pressure, temperature, battery and signal strength, over passive Bluetooth —
+plus an opt-in active read for sensors that keep their pressure to themselves.
+No cloud, no pairing, no ESP32 required (though one helps if your HA box is far
 from the car).
+
+Needs Home Assistant 2024.12 or newer.
 
 ---
 
@@ -130,6 +137,7 @@ Per sensor:
 | Temperature | — | °C |
 | Battery | diagnostic | % from a lithium discharge curve; coarse by nature |
 | Voltage | diagnostic | cell volts, the honest version of the above |
+| Last reading | — | when the pressure above was measured |
 | Awake | diagnostic | false while the sensor is in its low duty-cycle mode |
 | Signal strength | diagnostic | disabled by default |
 | Raw pressure / Raw temperature / Status | diagnostic | disabled by default; for [calibration](docs/CALIBRATION.md) |
@@ -138,9 +146,58 @@ Entities stay available when a sensor goes quiet, and are marked
 `assumed_state`. This is deliberate — a parked car stops transmitting, and you
 want yesterday's pressure rather than `unavailable` on your dashboard.
 
+The price of that is a reading from yesterday looking exactly like one from a
+minute ago, and `assumed_state` does not help: it reaches the state attributes,
+but Home Assistant only draws it for entities you can operate, never for a
+sensor. **Last reading** is there to say so out loud, next to the pressure it
+dates. `Awake` is cleared from the integration's own clock for the same reason —
+a sleeping sensor sends nothing at all, so without that it could only ever go on
+and stay on.
+
 While a sensor is asleep it publishes **no** pressure or temperature. Sleep
 frames do not refresh those bytes, so decoding them would give you a confident,
 stale, wrong number.
+
+---
+
+## If pressure never appears
+
+Some sensors — the fitted Autel units tested here among them — never put a
+reading in their advertisement, even on the road. They hand pressure out only
+over a connection, the way a car reads them: Home Assistant connects to the
+sensor, asks for pressure and temperature on the Tesla service, and feeds the
+reply into the same entities.
+
+Turn it on per sensor under **Configure → Read over a connection**. It is
+experimental and off by default:
+
+- it needs a *connectable* path — a local adapter, or an ESPHome proxy with
+  active connections enabled; a passive-only proxy cannot open a connection
+- it polls on its own 30-second timer (`CONNECT_POLL_INTERVAL` in `const.py`),
+  and keeps the connection open between polls so a sensor that volunteers a
+  reading is heard at once — measured on four sensors, one arrives unasked
+  about every 28 seconds, and a poll that lands inside that window skips the
+  request entirely
+- once a sensor has been silent for `AWAKE_TIMEOUT` it is treated as asleep and
+  tried only every `CONNECT_IDLE_POLL_INTERVAL` (five minutes), with fewer
+  connection attempts. A parked wheel answers nothing, so the short clock only
+  buys failed connections; waking is still caught at once, because a sensor that
+  starts turning advertises again and that advertisement drives a poll
+- each sensor therefore holds one of that adapter's or proxy's connection slots
+  while it is in range — four wheels take four slots
+- it asks for a measurement and nothing else: no enrolment, no bonding, no write
+  that changes the sensor
+- pressure arrives in its own encoding, so check it against a gauge
+
+Confirm your sensors answer at all from a laptop next to the wheel first:
+
+```bash
+.venv/bin/python tools/tpms_gatt.py --request
+```
+
+If nothing ever replies, the payload history in the diagnostics download says
+whether the advertisement path is getting anywhere either — see
+[docs/INSTALL.md](docs/INSTALL.md#troubleshooting).
 
 ---
 
@@ -178,6 +235,7 @@ has the detail.
 |---|---|
 | `tools/tpms_scan.py` | live scan and decode; `--raw`, `--all`, `--log`, `--profile` |
 | `tools/decode_hex.py` | decode a payload captured elsewhere; `--compare` shows both profiles |
+| `tools/tpms_gatt.py` | connect to one sensor and read it the way a car does; `--request`, `--list` |
 
 `decode_hex.py` accepts either bare manufacturer data or a whole advertisement,
 and works out which it is:
@@ -205,12 +263,15 @@ was done.
 ## Tests
 
 ```bash
-.venv/bin/pip install pytest
-.venv/bin/python -m pytest tests/ -q
+.venv/bin/pip install -r requirements-test.txt
+.venv/bin/python -m pytest -q
 ```
 
 The decoder in `custom_components/tesla_tpms_ble/decoder.py` has no Home
-Assistant or bleak imports, so the tests run anywhere.
+Assistant or bleak imports, so `pip install pytest` alone is enough for the
+decoder suite — the integration tests skip themselves when the Home Assistant
+Bluetooth stack is not installed. CI runs the same suite, `ruff check .` and Home Assistant's
+own `hassfest` manifest validation on every push.
 
 ## Credits
 

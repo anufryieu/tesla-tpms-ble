@@ -2,5 +2,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
 *.jsonl
+logs/
 tesla_tpms_ble.zip
+.DS_Store

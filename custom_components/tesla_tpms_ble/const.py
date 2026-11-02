@@ -31,3 +31,23 @@ DEFAULT_CONNECT = False
 #
 # Every poll is a GATT connection, so this trades sensor battery for resolution.
 CONNECT_POLL_INTERVAL = 30.0
+
+# How long a reading keeps the sensor counted as awake. An awake sensor answers
+# or volunteers something every poll, so three missed intervals means it has
+# stopped talking; the slack is there so one dropped connection does not flap
+# the Awake state. Nothing else can clear it -- a reading fetched over GATT is
+# awake by definition, and a sleeping sensor sends nothing to say otherwise.
+AWAKE_TIMEOUT = 90.0
+
+# How often to try once the sensor has gone quiet. It sleeps when the wheel
+# stops and answers nothing until it moves again, so the 30-second clock above
+# buys nothing and costs a failed connection attempt every half minute, around
+# the clock. Waking is not missed: a sensor that starts advertising again is an
+# advertisement Home Assistant forwards, which polls through the usual path.
+CONNECT_IDLE_POLL_INTERVAL = 300.0
+
+# Connection attempts per poll. bleak-retry-connector's own default is right for
+# a device that is there and busy, and wrong for one that is asleep and will not
+# answer any of them -- so a quiet sensor gets fewer.
+CONNECT_ATTEMPTS = 4
+CONNECT_QUIET_ATTEMPTS = 2
