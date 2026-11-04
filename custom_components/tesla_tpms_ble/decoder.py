@@ -79,6 +79,22 @@ MIN_PAYLOAD_LEN: Final[int] = 8
 # status values below this mean "asleep / no fresh measurement".
 STATUS_AWAKE_MIN: Final[int] = 0x05
 
+# What a tyre can actually read, in bar gauge. The ceiling clears anything on
+# the road -- a truck tyre runs about 9 bar -- and the floor allows a flat one
+# plus the sensor's own offset. This is not second-guessing the sensor; it is
+# how a number that was never a pressure gets recognised. Both paths can hand
+# one over: the GATT reply is protobuf, where a counter in the pressure field
+# decodes as readily as a measurement, and the advertisement's pressure is a
+# raw uint16 spanning 654 bar if the frame is not the record we took it for.
+MIN_PLAUSIBLE_BAR: Final[float] = -0.5
+MAX_PLAUSIBLE_BAR: Final[float] = 10.0
+
+# What the TPData temperature field can read, in whole degrees C. Autel specs
+# -40..+105 for the part; the margin either side is there so a cold morning is
+# never mistaken for a mis-parse.
+MIN_PLAUSIBLE_C: Final[float] = -50.0
+MAX_PLAUSIBLE_C: Final[float] = 125.0
+
 _PSI_PER_BAR: Final[float] = 14.5037737730
 _KPA_PER_PSI: Final[float] = 6.89475729
 
@@ -213,8 +229,9 @@ def decode(
     already stripped* -- exactly what ``manufacturer_data[555]`` gives you in
     both bleak and Home Assistant.
 
-    Returns ``None`` if the payload is too short: under 3 bytes, or an awake
-    frame without the measurement bytes.
+    Returns ``None`` if the payload is too short -- under 3 bytes, or an awake
+    frame without the measurement bytes -- or if the pressure it decodes to is
+    one no tyre can read, which means the frame is not what it looked like.
     """
     if mfr_data is None or len(mfr_data) < MIN_SLEEP_PAYLOAD_LEN:
         return None
@@ -250,6 +267,12 @@ def decode(
     raw_battery_mv = raw["battery_mv"]
 
     pressure_bar = (raw_pressure - profile.pressure_offset) / profile.pressure_divisor
+    if not MIN_PLAUSIBLE_BAR <= pressure_bar <= MAX_PLAUSIBLE_BAR:
+        # Nothing fitted to a wheel reads this. The frame passed the shape
+        # check but is not the record we took it for, so drop all of it rather
+        # than publish one field: the bytes are still kept in the payload
+        # history, which is where an unrecognised frame gets worked out.
+        return None
     # A deflated tyre reads slightly negative because of sensor offset; clamp.
     if -0.2 < pressure_bar < 0.0:
         pressure_bar = 0.0
@@ -408,27 +431,6 @@ def _unzigzag(value: int) -> int:
     return (value >> 1) ^ -(value & 1)
 
 
-def _find_tpdata_fields(data: bytes, depth: int = 0) -> tuple[int, int | None] | None:
-    """Find the innermost ``{pressure, temperature}`` message, recursing in.
-
-    A real reply from a fitted sensor is ``TPData`` wrapped in two outer
-    messages: ``field 2 -> field 28 -> {field 1 = pressure, field 2 = temp}``.
-    Rather than hard-code that nesting, search for the first message carrying a
-    varint field 1 (pressure), descending through length-delimited fields.
-    Returns ``(pressure_raw, temperature_raw_or_None)`` or ``None``.
-    """
-    if depth > 5:  # a sane bound; real nesting is two deep
-        return None
-    varints, submessages = _collect_protobuf(data)
-    if 1 in varints:
-        return varints[1], varints.get(2)
-    for sub in submessages:
-        found = _find_tpdata_fields(sub, depth + 1)
-        if found is not None:
-            return found
-    return None
-
-
 # TPData pressure is absolute pressure in whole kPa. This was pinned against a
 # reference: four fitted sensors read raw 523/527/538/542, and the owner's gauge
 # gave 62/62/63.5/64.5 psi -- i.e. gauge = (raw - 1 atm) kPa, matching all four
@@ -439,6 +441,61 @@ def _find_tpdata_fields(data: bytes, depth: int = 0) -> tuple[int, int | None] |
 _ATMOSPHERE_KPA: Final[float] = 101.325
 
 
+def _reads_as_tpdata(varints: dict[int, int]) -> bool:
+    """Judge whether one message's fields read as a ``TPData`` measurement.
+
+    A protobuf field is just a number, and the search below walks every message
+    in the reply, so a sequence counter or a status code sitting in field 1 is
+    offered as a pressure exactly as a measurement is. One was: a reply
+    carrying 28401 there reached the entities as 284 bar. Reject what no tyre
+    can read, and the counter stops looking like a reading.
+    """
+    pressure_raw = varints.get(1)
+    if pressure_raw is None:
+        return False
+    if not (
+        MIN_PLAUSIBLE_BAR
+        <= (pressure_raw - _ATMOSPHERE_KPA) / 100.0
+        <= MAX_PLAUSIBLE_BAR
+    ):
+        return False
+    temperature_raw = varints.get(2)
+    if temperature_raw is None:
+        # A pressure-only reply is legal, so the pressure window is all there
+        # is to go on. Every sensor captured so far does send both.
+        return True
+    return MIN_PLAUSIBLE_C <= _unzigzag(temperature_raw) <= MAX_PLAUSIBLE_C
+
+
+def _find_tpdata_fields(data: bytes, depth: int = 0) -> tuple[int, int | None] | None:
+    """Find the innermost ``{pressure, temperature}`` message, recursing in.
+
+    A real reply from a fitted sensor is ``TPData`` wrapped in two outer
+    messages: ``field 2 -> field 28 -> {field 1 = pressure, field 2 = temp}``.
+    Rather than hard-code that nesting, search for a message whose fields read
+    as a measurement, descending through length-delimited fields.
+
+    Two things keep a wrapper from being mistaken for the reading it carries.
+    Nested messages are searched *before* this one's own fields, and ``TPData``
+    itself nests nothing -- so the reading always wins over whatever encloses
+    it. And a message that merely has a field 1 is stepped over unless that
+    field reads as a measurement. Either alone would have stopped the counter
+    that was published as 284 bar; both are cheap.
+
+    Returns ``(pressure_raw, temperature_raw_or_None)`` or ``None``.
+    """
+    if depth > 5:  # a sane bound; real nesting is two deep
+        return None
+    varints, submessages = _collect_protobuf(data)
+    for sub in submessages:
+        found = _find_tpdata_fields(sub, depth + 1)
+        if found is not None:
+            return found
+    if _reads_as_tpdata(varints):
+        return varints[1], varints.get(2)
+    return None
+
+
 def decode_tpdata(payload: bytes | bytearray) -> TeslaTpmsReading | None:
     """Decode a ``TPData`` indication received over the GATT connection.
 
@@ -446,15 +503,13 @@ def decode_tpdata(payload: bytes | bytearray) -> TeslaTpmsReading | None:
     possibly wrapped in one or more outer messages. ``TPData`` carries pressure
     as ``int32`` field 1 and temperature as ``sint32`` (zigzag) field 2 in
     whole degrees C -- a different encoding from the advertisement. Returns
-    ``None`` if no plausible pressure field is found.
+    ``None`` if the reply holds nothing that reads as a measurement -- which
+    the caller reports as an undecipherable reply, keeping the bytes.
     """
     found = _find_tpdata_fields(bytes(payload))
     if found is None:
         return None
     pressure_raw, temperature_raw = found
-    # Guard against a mis-parse turning random bytes into a "reading".
-    if not 0 <= pressure_raw <= 100_000:
-        return None
 
     raw: dict[str, int] = {"gatt_pressure": pressure_raw}
     temperature_c: float | None = None

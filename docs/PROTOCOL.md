@@ -283,6 +283,21 @@ sensors answered. A reply is a `TPData` message wrapped in two outer messages:
 `decode_tpdata()` therefore searches inward for the innermost message carrying
 a varint field 1 rather than assuming a flat layout.
 
+A protobuf field is just a number, though, and the search sees every message in
+the reply — so a sequence counter sitting in field 1 is offered as a pressure
+exactly as a measurement is. One was: on 3 November 2026 a rear-left sensor
+published 284 bar and then 535 bar, from replies whose field 1 held 28401 and
+53601. Two things now stop that. Nested messages are searched before the
+enclosing one's own fields, and `TPData` nests nothing, so the reading always
+wins over whatever wraps it; and a message is only taken for a reading if its
+fields read as one — pressure within −0.5…10 bar gauge, and any temperature
+within −50…+125 °C. A reply that holds neither is reported as undecipherable,
+with the bytes kept in the diagnostics.
+
+The advertisement path has the same pressure window. Its raw field is a uint16
+spanning 654 bar, and a frame landing outside what a tyre can read is dropped
+whole rather than published a field at a time.
+
 Temperature is a plain `sint32` in whole °C (zigzag-decoded: `38 → 19`).
 Pressure is **absolute pressure in whole kPa**, confirmed against a gauge: the
 sensors were on a camper, and the owner's readings were front 62 psi, rear
