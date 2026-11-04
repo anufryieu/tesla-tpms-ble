@@ -177,6 +177,16 @@ class TestGuards:
         assert r.raw["temperature"] == 72
         assert r.raw["battery_mv"] == 3050
 
+    @pytest.mark.parametrize("raw_pressure", [1200, 28401 & 0xFFFF, 65535])
+    def test_implausible_pressure_rejects_the_whole_frame(self, raw_pressure):
+        # The uint16 spans 654 bar. A frame that lands outside what a tyre can
+        # read is not the record we took it for, whatever the battery said.
+        assert decode(build_payload(pressure=raw_pressure)) is None
+
+    def test_the_plausible_range_covers_a_loaded_truck_tyre(self):
+        # ~9 bar, the top of what runs on the road, must still decode.
+        assert decode(build_payload(pressure=1000)).pressure_bar == 9.0
+
 
 class TestShapeHeuristic:
     def test_accepts_plausible_tpms_frame(self):
@@ -303,3 +313,25 @@ class TestDecodeTPData:
     def test_rejects_an_implausible_pressure(self):
         # field 1 varint = 200000, far outside any real reading
         assert decode_tpdata(bytes.fromhex("08c09a0c")) is None
+
+    @pytest.mark.parametrize(
+        ("hex_reply", "counter"),
+        [("08f1dd01", 28401), ("08e1a203", 53601), ("08ffff03", 65535)],
+    )
+    def test_a_counter_in_field_1_is_not_a_pressure(self, hex_reply, counter):
+        # Seen in the field: replies like these reached the entities as 284 and
+        # 535 bar, because field 1 was read as a pressure whatever it held.
+        assert counter > 1100  # i.e. over 10 bar once scaled
+        assert decode_tpdata(bytes.fromhex(hex_reply)) is None
+
+    def test_a_counter_in_a_wrapper_does_not_mask_the_reading(self):
+        # Same counter, this time wrapping a real reply. The reading inside is
+        # what must come out -- the wrapper must not end the search.
+        real = self.REAL_REPLIES["1104"][0]
+        reading = decode_tpdata(bytes.fromhex("08f1dd01" + real))
+        assert reading.raw["gatt_pressure"] == 538
+
+    def test_rejects_a_message_whose_temperature_is_impossible(self):
+        # Plausible pressure, but field 2 unzigzags to 500 degC: the pair is
+        # not a measurement, so neither half of it is trusted.
+        assert decode_tpdata(bytes.fromhex("088f0410e807")) is None
